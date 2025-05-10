@@ -1,12 +1,12 @@
-# Byte-compiled / optimized / DLL files
+# バイトコンパイル済み / 最適化 / DLLファイル
 __pycache__/
 *.py[cod]
 *$py.class
 
-# C extensions
+# C拡張
 *.so
 
-# Distribution / packaging
+# 配布 / パッケージング
 .Python
 build/
 develop-eggs/
@@ -27,16 +27,16 @@ share/python-wheels/
 MANIFEST
 
 # PyInstaller
-#  Usually these files are written by a python script from a template
-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+#  通常、これらのファイルはPythonスクリプトからテンプレートを使用して作成され、
+#  PyInstallerがexeを構築する際に日付やその他の情報を注入します
 *.manifest
 *.spec
 
-# Installer logs
+# インストーラーログ
 pip-log.txt
 pip-delete-this-directory.txt
 
-# Unit test / coverage reports
+# ユニットテスト / カバレッジレポート
 htmlcov/
 .tox/
 .nox/
@@ -51,24 +51,24 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Translations
+# 翻訳
 *.mo
 *.pot
 
-# Django stuff:
+# Djangoの設定
 *.log
 local_settings.py
 db.sqlite3
 db.sqlite3-journal
 
-# Flask stuff:
+# Flaskの設定
 instance/
 .webassets-cache
 
-# Scrapy stuff:
+# Scrapyの設定
 .scrapy
 
-# Sphinx documentation
+# Sphinx文書
 docs/_build/
 
 # PyBuilder
@@ -83,51 +83,49 @@ profile_default/
 ipython_config.py
 
 # pyenv
-#   For a library or package, you might want to ignore these files since the code is
-#   intended to run in multiple environments; otherwise, check them in:
+#   ライブラリやパッケージの場合、複数の環境で実行されることを
+#   意図しているため、これらのファイルを無視することをお勧めします
 # .python-version
 
 # pipenv
-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
-#   install all needed dependencies.
+#   pypa/pipenv#598によると、バージョン管理にPipfile.lockを含めることが推奨されています。
+#   ただし、プラットフォーム固有の依存関係やクロスプラットフォームサポートがない依存関係がある場合、
+#   pipenvは動作しない依存関係をインストールしたり、必要な依存関係をすべてインストールしなかったりする可能性があります。
 #Pipfile.lock
 
 # UV
-#   Similar to Pipfile.lock, it is generally recommended to include uv.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
+#   Pipfile.lockと同様に、一般的にuv.lockをバージョン管理に含めることが推奨されています。
+#   これは特にバイナリパッケージの再現性を確保するために推奨されており、
+#   ライブラリでは一般的に無視されることが多いです。
 #uv.lock
 
 # poetry
-#   Similar to Pipfile.lock, it is generally recommended to include poetry.lock in version control.
-#   This is especially recommended for binary packages to ensure reproducibility, and is more
-#   commonly ignored for libraries.
+#   Pipfile.lockと同様に、poetry.lockをバージョン管理に含めることが一般的に推奨されています。
+#   これは特にバイナリパッケージの再現性を確保するために推奨されており、
+#   ライブラリでは一般的に無視されることが多いです。
 #   https://python-poetry.org/docs/basic-usage/#commit-your-poetrylock-file-to-version-control
 #poetry.lock
 
 # pdm
-#   Similar to Pipfile.lock, it is generally recommended to include pdm.lock in version control.
+#   Pipfile.lockと同様に、pdm.lockをバージョン管理に含めることが一般的に推奨されています。
 #pdm.lock
-#   pdm stores project-wide configurations in .pdm.toml, but it is recommended to not include it
-#   in version control.
+#   pdmはプロジェクト全体の設定を.pdm.tomlに保存しますが、バージョン管理に含めないことが推奨されています。
 #   https://pdm.fming.dev/latest/usage/project/#working-with-version-control
 .pdm.toml
 .pdm-python
 .pdm-build/
 
-# PEP 582; used by e.g. github.com/David-OConnor/pyflow and github.com/pdm-project/pdm
+# PEP 582; github.com/David-OConnor/pyflow や github.com/pdm-project/pdm などで使用
 __pypackages__/
 
-# Celery stuff
+# Celery関連
 celerybeat-schedule
 celerybeat.pid
 
-# SageMath parsed files
+# SageMath解析ファイル
 *.sage.py
 
-# Environments
+# 環境設定
 .env
 .venv
 env/
@@ -136,14 +134,14 @@ ENV/
 env.bak/
 venv.bak/
 
-# Spyder project settings
+# Spyderプロジェクト設定
 .spyderproject
 .spyproject
 
-# Rope project settings
+# Ropeプロジェクト設定
 .ropeproject
 
-# mkdocs documentation
+# mkdocs文書
 /site
 
 # mypy
@@ -151,24 +149,53 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# Pyre type checker
+# Pyre型チェッカー
 .pyre/
 
-# pytype static type analyzer
+# pytype静的型アナライザ
 .pytype/
 
-# Cython debug symbols
+# Cythonデバッグシンボル
 cython_debug/
 
 # PyCharm
-#  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
-#  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore
-#  and can be added to the global gitignore or merged into this file.  For a more nuclear
-#  option (not recommended) you can uncomment the following to ignore the entire idea folder.
+#  JetBrains固有のテンプレートは、
+#  https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore で管理されており、
+#  グローバルなgitignoreに追加したり、このファイルにマージしたりすることができます。
+#  より核心的なオプション（推奨されません）として、以下のコメントを解除してideaフォルダ全体を無視することもできます。
 #.idea/
 
-# Ruff stuff:
-.ruff_cache/
+# VSCode設定
+.vscode/
 
-# PyPI configuration file
+# PyPI設定ファイル
 .pypirc
+
+# PDFリネームツール固有のファイル
+# ----------------------------
+
+# 設定ファイル（APIキーなどの機密情報を含む）
+.env
+
+# ルール設定ファイル（組織固有のルールを含む可能性あり）
+rename_rules.yaml
+
+# 一時ファイルディレクトリ
+temp_images/
+jpeg/
+
+# ログファイル
+pdf_renamer.log
+*.log
+
+# Google Cloud認証情報
+*.json
+
+# サンプル/テスト用PDF
+sample_pdfs/
+test_pdfs/
+
+# ビルド成果物
+build/
+dist/
+*.exe
