@@ -38,16 +38,39 @@ import google.api_core.exceptions
 # ============================================================================
 
 # Set up logging
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_ENV_PATH = SCRIPT_DIR / '.env'
+DEFAULT_YAML_PATH = SCRIPT_DIR / 'rename_rules.yaml'
+DEFAULT_IMAGE_PATH = SCRIPT_DIR / 'temp_images'
+APP_VERSION = "2025年5月10日バージョン"
+
+# Set up logging
+log_file_path = os.path.join(SCRIPT_DIR, "pdf-renamer.log")
+
+# 既存のハンドラーをクリア
+for handler in logging.root.handlers[:]:
+    logging.root.removeHandler(handler)
+
+# ログの基本設定
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler("pdf_renamer.log", encoding="utf-8"),
+        logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),
         logging.StreamHandler()
     ]
 )
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+# 初期化ログの出力
+logger.debug("=" * 50)
+logger.debug("プログラム開始")
+logger.debug(f"ログファイルの出力先: {log_file_path}")
+logger.debug(f"Pythonバージョン: {sys.version}")
+logger.debug(f"実行ディレクトリ: {os.getcwd()}")
+logger.debug("=" * 50)
 
 # Constants and global variables
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -339,6 +362,8 @@ class PDFProcessor:
             if response.text_annotations:
                 result = response.text_annotations[0].description
                 logger.debug(f"OCR successful with {len(result)} characters extracted")
+                # OCR結果をログファイルに出力
+                logger.info(f"OCR結果:\n{'-' * 50}\n{result}\n{'-' * 50}")
                 return result
             else:
                 logger.warning(f"No text detected in image: {image_path}")
@@ -358,14 +383,112 @@ class PDFProcessor:
     
     def _convert_wareki_to_western(self, text):
         """Convert Japanese era dates to Western (Gregorian) dates."""
+        # 年号なしの和暦の変換（令和を想定）
+        text = re.sub(r'(\d+)年', lambda m: str(2018 + int(m.group(1))) + '年', text)
+        
         # 令和の変換 (Reiwa: 2019-)
         text = re.sub(r'令和(\d+)年', lambda m: str(2018 + int(m.group(1))) + '年', text)
         # 平成の変換 (Heisei: 1989-2019)
         text = re.sub(r'平成(\d+)年', lambda m: str(1988 + int(m.group(1))) + '年', text)
         # 昭和の変換 (Showa: 1926-1989)
         text = re.sub(r'昭和(\d+)年', lambda m: str(1925 + int(m.group(1))) + '年', text)
+        # 大正の変換 (Taisho: 1912-1926)
+        text = re.sub(r'大正(\d+)年', lambda m: str(1911 + int(m.group(1))) + '年', text)
         return text
         
+    def _extract_death_date(self, text):
+        """Extract death date from text and convert to YYYY年MM月DD日 format."""
+        # 死亡年月日時のパターン
+        patterns = [
+            r'死亡年月日時\s*令和(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日\s*令和(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日時\s*平成(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日\s*平成(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日時\s*昭和(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日\s*昭和(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日時\s*令和(\d+)年(\d+)月中旬頃',
+            r'死亡年月日\s*令和(\d+)年(\d+)月中旬頃',
+            # 年号なしのパターンを追加
+            r'死亡年月日時\s*(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日\s*(\d+)年(\d+)月(\d+)日',
+            r'死亡年月日時\s*(\d+)年(\d+)月中旬頃',
+            r'死亡年月日\s*(\d+)年(\d+)月中旬頃'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                if len(match.groups()) == 3:
+                    year = int(match.group(1))
+                    month = match.group(2).zfill(2)
+                    
+                    # 日付が「中旬頃」の場合は15日とする
+                    if '中旬頃' in match.group(0):
+                        day = '15'
+                    else:
+                        day = match.group(3).zfill(2)
+                    
+                    # 年号なしの場合は令和として扱う
+                    if not any(era in pattern for era in ['令和', '平成', '昭和', '大正']):
+                        year = 2018 + year
+                    
+                    return f"{year}年{month}月{day}日"
+                
+        return None
+
+    def _extract_name(self, text, alt_keys=None):
+        """Extract deceased person's name from text. alt_keysで追加のキーワードも探索可"""
+        # 死亡者の氏名のパターン
+        patterns = [
+            r'死亡者の氏名\s*([^\n]+)',
+            r'死亡者氏名\s*([^\n]+)',
+            r'死亡者\s*氏名\s*([^\n]+)',
+            r'死亡者\s*([^\n]+)'
+        ]
+        if alt_keys:
+            for key in alt_keys:
+                patterns.append(rf'{key}\s*([^\n]+)')
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                name = match.group(1).strip()
+                # 余分な空白を削除
+                name = re.sub(r'\s+', ' ', name)
+                # 性別やその他の情報が含まれている場合は除去
+                name = re.sub(r'\s*[男女]\s*$', '', name)
+                return name
+        return None
+
+    def _extract_cremation_date(self, text):
+        """Extract cremation date from text and convert to YYYY年MM月DD日 format."""
+        # 火葬年月日のパターン
+        patterns = [
+            r'火葬年月日\s*令和(\d+)年(\d+)月(\d+)日',
+            r'火葬\s*年月日\s*令和(\d+)年(\d+)月(\d+)日',
+            r'火葬年月日\s*平成(\d+)年(\d+)月(\d+)日',
+            r'火葬\s*年月日\s*平成(\d+)年(\d+)月(\d+)日',
+            r'火葬年月日\s*昭和(\d+)年(\d+)月(\d+)日',
+            r'火葬\s*年月日\s*昭和(\d+)年(\d+)月(\d+)日',
+            # 年号なしのパターンを追加
+            r'火葬年月日\s*(\d+)年(\d+)月(\d+)日',
+            r'火葬\s*年月日\s*(\d+)年(\d+)月(\d+)日'
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                year = int(match.group(1))
+                month = match.group(2).zfill(2)
+                day = match.group(3).zfill(2)
+                
+                # 年号なしの場合は令和として扱う
+                if not any(era in pattern for era in ['令和', '平成', '昭和', '大正']):
+                    year = 2018 + year
+                
+                return f"{year}年{month}月{day}日"
+                
+        return None
+
     def _propose_file_name(self, ocr_result):
         """Generate a filename proposal based on OCR results and YAML rules."""
         try:
@@ -374,7 +497,7 @@ class PDFProcessor:
             if not ocr_result or ocr_result.strip() == "":
                 logger.error("OCR result is empty")
                 return f"{datetime.now().strftime('%Y年%m月%d日')}_不明.pdf"
-                
+            
             if not self.yaml_rules:
                 logger.error("YAML rules not loaded")
                 return f"{datetime.now().strftime('%Y年%m月%d日')}_エラー.pdf"
@@ -385,7 +508,40 @@ class PDFProcessor:
             # Normalize OCR result: fix common OCR errors
             ocr_result_normalized = self._normalize_ocr_result(ocr_result)
             
-            # Set up format parameters with defaults
+            # 書類の種類を判定
+            doc_type = None
+            if "死体火葬許可証" in ocr_result_normalized:
+                doc_type = "火葬許可証"
+            elif "火葬証明書" in ocr_result_normalized:
+                doc_type = "火葬証明書"
+            
+            logger.debug(f"判定された書類の種類: {doc_type}")
+            
+            # 書類の種類に応じた処理
+            if doc_type == "火葬許可証":
+                death_date = self._extract_death_date(ocr_result_normalized)
+                name = self._extract_name(ocr_result_normalized)
+                if death_date and name:
+                    # 日付を西暦に変換
+                    western_date = self._convert_wareki_to_western(death_date)
+                    # 氏名のスペースを削除
+                    name = name.replace(" ", "")
+                    filename = f"{western_date}往生 {name}の火葬許可証.pdf"
+                    logger.info(f"火葬許可証のファイル名を生成: {filename}")
+                    return filename
+            elif doc_type == "火葬証明書":
+                cremation_date = self._extract_cremation_date(ocr_result_normalized)
+                name = self._extract_name(ocr_result_normalized)
+                if cremation_date and name:
+                    # 日付を西暦に変換
+                    western_date = self._convert_wareki_to_western(cremation_date)
+                    # 氏名のスペースを削除
+                    name = name.replace(" ", "")
+                    filename = f"{western_date} {name}の火葬証明書.pdf"
+                    logger.info(f"火葬証明書のファイル名を生成: {filename}")
+                    return filename
+            
+            # その他の書類の処理
             current_date = datetime.now().strftime('%Y年%m月%d日')
             format_params = DefaultDict({
                 "担当者": self.selected_person.get(),
@@ -397,7 +553,10 @@ class PDFProcessor:
                 "金額": "不明",
                 "取引先": "不明",
                 "申請者": "不明",
-                "年度": "不明"
+                "年度": "不明",
+                "死亡年月日": current_date,
+                "火葬年月日": current_date,
+                "氏名": "不明"
             })
             
             # Auto-assign person if needed
@@ -409,32 +568,28 @@ class PDFProcessor:
             logger.debug(f"Extracted date: {western_date}")
             
             # Try to find a matching rule
-            sorted_rules = sorted(
-                rules, 
-                key=lambda x: x.get("ルール", {}).get("優先順位", float("inf")) 
-                if isinstance(x, dict) and "ルール" in x 
-                else x.get("優先順位", float("inf"))
-            )
-            
-            for rule in sorted_rules:
+            for rule in rules:
                 current_rule = rule.get("ルール", rule) if "ルール" in rule else rule
                 logger.debug(f"Checking rule: {current_rule.get('説明', 'Unnamed rule')}")
                 
-                if "正規表現" in current_rule and re.search(
-                    current_rule["正規表現"], ocr_result_normalized, re.IGNORECASE):
-                    
-                    logger.debug(f"Rule matched: {current_rule.get('説明', 'Unnamed rule')}")
-                    return self._process_rule(current_rule, western_date, format_params, ocr_result_normalized)
+                if "正規表現" in current_rule:
+                    pattern = current_rule["正規表現"]
+                    match = re.search(pattern, ocr_result_normalized, re.IGNORECASE)
+                    if match:
+                        logger.info(f"ルールが一致しました: {current_rule.get('説明', 'Unnamed rule')}")
+                        logger.info(f"適用された正規表現: {pattern}")
+                        logger.info(f"マッチした文字列: {match.group(0)}")
+                        return self._process_rule(current_rule, western_date, format_params, ocr_result_normalized)
             
             # Apply default rule if no specific rule matched
-            logger.debug("No specific rule matched, applying default rule")
+            logger.info("特定のルールに一致しませんでした。デフォルトルールを適用します。")
             default_rule_dict = next((r for r in rules if "デフォルト" in r), {})
             default_rule = default_rule_dict.get("デフォルト", {})
             
             if not default_rule:
-                logger.warning("No default rule found in YAML")
+                logger.warning("デフォルトルールが見つかりませんでした")
                 return f"{western_date}_不明.pdf"
-                
+            
             return self._process_rule(default_rule, western_date, format_params, ocr_result_normalized)
             
         except Exception as e:
@@ -520,64 +675,103 @@ class PDFProcessor:
         # If no date found, use current date
         return datetime.now().strftime('%Y年%m月%d日')
     
-    def _process_rule(self, rule, date, format_params, ocr_result):
-        """Process a rule to generate a filename."""
-        doc_type = rule.get("書類の種類", "不明")
-        naming_rule = rule.get("命名ルール", "{日付}_{内容}")
-        
+    def _process_rule(self, rule, western_date, format_params, ocr_result):
+        """Process a single rule and return the filename."""
         try:
-            # Format the prompt with all available parameters
-            prompt = rule.get("プロンプト", "").format(
-                書類の種類=doc_type,
-                命名ルール=naming_rule,
-                ocr_result=ocr_result,
-                日付=date,
-                今日の日付=format_params["今日の日付"],
-                担当者=format_params["担当者"],
-                取引先=format_params["取引先"],
-                タイトル=format_params["タイトル"],
-                金額=format_params["金額"],
-                申請者=format_params["申請者"],
-                年度=format_params["年度"],
-                内容=format_params["内容"],
-                組織名=format_params.get("組織名", "")
-            )
+            doc_type = rule.get("書類の種類", "不明")
+            naming_rule = rule.get("命名ルール", "{日付}_{内容}")
+            logger.info(f"処理中の書類種類: {doc_type}")
+            logger.info(f"適用する命名ルール: {naming_rule}")
             
-            logger.debug(f"Sending prompt to OpenAI: {prompt[:100]}...")
-            
-            # Call OpenAI API
-            openai.api_key = self.config.get('OPENAI_API_KEY')
-            response = openai.chat.completions.create(
-                model=self.config.get('OPENAI_MODEL'),
-                messages=[{"role": "user", "content": prompt}],
-                temperature=self.config.get('OPENAI_TEMPERATURE')
-            )
-            
-            # Parse response
-            file_name_raw = response.choices[0].message.content.strip()
-            logger.debug(f"OpenAI response: {file_name_raw}")
-            
-            # Extract the filename (expected to be between ** markers)
-            match = re.search(r'\*\*(.+?)\*\*', file_name_raw)
-            file_name = match.group(1) if match else file_name_raw
-            
-            if not file_name or file_name == "ファイル名":
-                file_name = date
-            
-            # Post-process the filename
-            file_name = self._convert_wareki_to_western(file_name)
-            file_name = file_name.replace("（不明）", "").replace("(不明)", "")
-            
-            # Ensure file has .pdf extension
-            if not file_name.lower().endswith('.pdf'):
-                file_name += '.pdf'
+            # プロンプトから情報を抽出
+            if "プロンプト" in rule:
+                prompt = rule["プロンプト"]
+                logger.info(f"プロンプトを処理中: {prompt}")
                 
-            logger.info(f"Proposed filename: {file_name}")
-            return file_name
+                # 死亡年月日と氏名を抽出
+                death_date = self._extract_death_date(ocr_result)
+                name = self._extract_name(ocr_result)
+                
+                if death_date:
+                    logger.info(f"抽出された死亡年月日: {death_date}")
+                    format_params["死亡年月日"] = death_date
+                if name:
+                    logger.info(f"抽出された氏名: {name}")
+                    format_params["氏名"] = name
+                
+                # その他の情報を抽出
+                for key in ["内容", "金額", "取引先", "申請者", "年度"]:
+                    if key in prompt:
+                        value = self._extract_value(ocr_result, key)
+                        if value:
+                            logger.info(f"抽出された{key}: {value}")
+                            format_params[key] = value
+            
+            # フォーマットパラメータをログ出力
+            logger.info("フォーマットパラメータ:")
+            for key, value in format_params.items():
+                logger.info(f"  {key}: {value}")
+            
+            # ファイル名を生成
+            try:
+                filename = naming_rule.format(**format_params)
+                logger.info(f"生成されたファイル名: {filename}")
+                
+                # PDF拡張子を追加
+                if not filename.lower().endswith('.pdf'):
+                    filename += '.pdf'
+                
+                return filename
+            except KeyError as e:
+                logger.error(f"フォーマットパラメータの不足: {e}")
+                return f"{western_date}_エラー.pdf"
             
         except Exception as e:
-            logger.exception(f"Error processing rule: {doc_type}")
-            return f"{date}_エラー.pdf"
+            logger.exception("Error processing rule")
+            return f"{western_date}_エラー.pdf"
+
+    def _extract_value(self, text, key):
+        """Extract a specific value from the OCR text."""
+        patterns = {
+            "内容": [
+                r"内容[：:]\s*([^\n]+)",
+                r"件名[：:]\s*([^\n]+)",
+                r"タイトル[：:]\s*([^\n]+)"
+            ],
+            "金額": [
+                r"金額[：:]\s*(\d+(?:,\d+)*)",
+                r"合計[：:]\s*(\d+(?:,\d+)*)",
+                r"￥\s*(\d+(?:,\d+)*)"
+            ],
+            "取引先": [
+                r"取引先[：:]\s*([^\n]+)",
+                r"発行元[：:]\s*([^\n]+)",
+                r"発行者[：:]\s*([^\n]+)"
+            ],
+            "申請者": [
+                r"申請者[：:]\s*([^\n]+)",
+                r"申請人[：:]\s*([^\n]+)",
+                r"氏名[：:]\s*([^\n]+)"
+            ],
+            "年度": [
+                r"年度[：:]\s*([^\n]+)",
+                r"(\d{4})年度",
+                r"令和(\d+)年度"
+            ]
+        }
+        
+        if key in patterns:
+            for pattern in patterns[key]:
+                match = re.search(pattern, text)
+                if match:
+                    value = match.group(1).strip()
+                    if key == "金額":
+                        value = value.replace(",", "")
+                    elif key == "年度" and "令和" in pattern:
+                        value = f"令和{value}年度"
+                    return value
+        
+        return None
     
     def _rename_pdf(self, pdf_file_path, new_pdf_name):
         """Rename a PDF file with the new name."""
