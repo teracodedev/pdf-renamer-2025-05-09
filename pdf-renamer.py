@@ -443,7 +443,8 @@ class PDFProcessor:
             r'死亡者の氏名\s*([^\n]+)',
             r'死亡者氏名\s*([^\n]+)',
             r'死亡者\s*氏名\s*([^\n]+)',
-            r'死亡者\s*([^\n]+)'
+            r'死亡者\s*([^\n]+)',
+            r'本人署名\s*([^\n]+)'  # 門徒誓約書用のパターンを追加
         ]
         if alt_keys:
             for key in alt_keys:
@@ -508,14 +509,20 @@ class PDFProcessor:
             # Normalize OCR result: fix common OCR errors
             ocr_result_normalized = self._normalize_ocr_result(ocr_result)
             
-            # 書類の種類を判定
+            # YAMLルールに基づいて書類の種類を判定
             doc_type = None
-            if "死体火葬許可証" in ocr_result_normalized:
-                doc_type = "火葬許可証"
-            elif "火葬証明書" in ocr_result_normalized:
-                doc_type = "火葬証明書"
+            matching_rule = None
             
-            logger.debug(f"判定された書類の種類: {doc_type}")
+            for rule in rules:
+                if "ルール" in rule:
+                    current_rule = rule["ルール"]
+                    if "正規表現" in current_rule:
+                        pattern = current_rule["正規表現"]
+                        if re.search(pattern, ocr_result_normalized, re.IGNORECASE):
+                            doc_type = current_rule.get("書類の種類")
+                            matching_rule = current_rule
+                            logger.info(f"書類の種類を判定: {doc_type}")
+                            break
             
             # 書類の種類に応じた処理
             if doc_type == "火葬許可証":
@@ -539,6 +546,17 @@ class PDFProcessor:
                     name = name.replace(" ", "")
                     filename = f"{western_date} {name}の火葬証明書.pdf"
                     logger.info(f"火葬証明書のファイル名を生成: {filename}")
+                    return filename
+            elif doc_type == "門徒誓約書":
+                # 提出日を抽出
+                submit_date = self._extract_submit_date(ocr_result_normalized)
+                # 氏名を抽出
+                name = self._extract_name(ocr_result_normalized)
+                if submit_date and name:
+                    # 氏名のスペースを削除
+                    name = name.replace(" ", "")
+                    filename = f"{submit_date}提出 {name}の門徒誓約書.pdf"
+                    logger.info(f"門徒誓約書のファイル名を生成: {filename}")
                     return filename
             
             # その他の書類の処理
@@ -632,6 +650,14 @@ class PDFProcessor:
         """Extract a date from text and convert to YYYY年MM月DD日 format."""
         # Try various date formats
         
+        # 西暦YYYY年MM月DD日 format（優先度を上げる）
+        date_match = re.search(r'西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日', text)
+        if date_match:
+            year = date_match.group(1)
+            month = date_match.group(2).zfill(2)
+            day = date_match.group(3).zfill(2)
+            return f"{year}年{month}月{day}日"
+            
         # 令和〇年〇月〇日 format
         date_match = re.search(r'令和\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日', text)
         if date_match:
@@ -818,6 +844,44 @@ class PDFProcessor:
         except Exception as e:
             logger.exception(f"Error renaming file: {pdf_file_path}")
             return False
+
+    def _extract_submit_date(self, text):
+        """Extract submit date from text and convert to YYYY年MM月DD日 format."""
+        # 提出日のパターン
+        patterns = [
+            r'提出日\s*西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日',
+            r'提出日\s*令和(\d+)年(\d+)月(\d+)日',
+            r'提出日\s*平成(\d+)年(\d+)月(\d+)日',
+            r'提出日\s*昭和(\d+)年(\d+)月(\d+)日',
+            r'提出日\s*(\d{4})年(\d{1,2})月(\d{1,2})日',
+            r'西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日\s*提出',
+            r'令和(\d+)年(\d+)月(\d+)日\s*提出',
+            r'平成(\d+)年(\d+)月(\d+)日\s*提出',
+            r'昭和(\d+)年(\d+)月(\d+)日\s*提出',
+            r'(\d{4})年(\d{1,2})月(\d{1,2})日\s*提出',
+            r'西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日'  # 西暦で始まるパターンを追加
+        ]
+        
+        for pattern in patterns:
+            match = re.search(pattern, text)
+            if match:
+                if "西暦" in pattern:
+                    year = match.group(1)
+                elif "令和" in pattern:
+                    year = str(2018 + int(match.group(1)))
+                elif "平成" in pattern:
+                    year = str(1988 + int(match.group(1)))
+                elif "昭和" in pattern:
+                    year = str(1925 + int(match.group(1)))
+                else:
+                    year = match.group(1)
+                    
+                month = match.group(2).zfill(2)
+                day = match.group(3).zfill(2)
+                
+                return f"{year}年{month}月{day}日"
+                
+        return None
 
 
 class PDFRenamerApp:
