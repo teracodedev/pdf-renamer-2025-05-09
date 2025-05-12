@@ -1277,6 +1277,11 @@ class PDFRenamerApp:
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="設定", menu=settings_menu)
         
+        # .envバックアップメニュー
+        settings_menu.add_command(label=".envをバックアップ", command=self._backup_env_file)
+        settings_menu.add_command(label="rename_rules.yamlをバックアップ", command=self._backup_yaml_file)
+        settings_menu.add_separator()
+        
         # 担当者サブメニュー
         person_menu = tk.Menu(settings_menu, tearoff=0)
         settings_menu.add_cascade(label="担当者の設定", menu=person_menu)
@@ -1554,6 +1559,90 @@ class PDFRenamerApp:
         except Exception as e:
             logger.error(f"AIモデル設定エラー: {e}")
             messagebox.showerror("エラー", f"AIモデルの設定に失敗しました: {e}")
+
+    def _backup_env_file(self):
+        """現在の.envファイルをバックアップします。"""
+        try:
+            env_path = self.config_manager.env_path
+            if not os.path.exists(env_path):
+                messagebox.showerror("エラー", ".envファイルが見つかりません。")
+                return
+
+            # バックアップファイル名を生成（日本語の日時形式）
+            timestamp = datetime.now().strftime('%Y年%m月%d日%H時%M分%S秒')
+            
+            # 保存されているバックアップ先を取得（なければデフォルトのbackupsディレクトリ）
+            saved_backup_dir = self.config_manager.get('BACKUP_DIR')
+            default_backup_dir = saved_backup_dir if saved_backup_dir else os.path.join(SCRIPT_DIR, 'backups')
+            
+            # バックアップ先のディレクトリを選択
+            backup_dir = askdirectory(
+                initialdir=default_backup_dir,
+                title=".envファイルのバックアップ先を選択"
+            )
+            
+            if not backup_dir:  # キャンセルされた場合
+                return
+                
+            # バックアップ先を.envに保存
+            self.config_manager.set('BACKUP_DIR', backup_dir)
+            self.config_manager.save_config()
+            
+            os.makedirs(backup_dir, exist_ok=True)
+            backup_path = os.path.join(backup_dir, f'.env.backup({timestamp})')
+
+            # ファイルをコピー
+            shutil.copy2(env_path, backup_path)
+            
+            logger.info(f".envファイルをバックアップしました: {backup_path}")
+            self._add_to_status(f".envファイルをバックアップしました: {backup_path}\n")
+            messagebox.showinfo("成功", f".envファイルをバックアップしました:\n{backup_path}")
+
+        except Exception as e:
+            logger.exception(".envファイルのバックアップ中にエラーが発生しました")
+            messagebox.showerror("エラー", f".envファイルのバックアップに失敗しました:\n{str(e)}")
+
+    def _backup_yaml_file(self):
+        """rename_rules.yamlファイルをバックアップします。"""
+        try:
+            yaml_path = self.config_manager.get('YAML_FILE')
+            if not os.path.exists(yaml_path):
+                messagebox.showerror("エラー", "YAMLルールファイルが見つかりません。")
+                return
+
+            # バックアップファイル名を生成（日本語の日時形式）
+            timestamp = datetime.now().strftime('%Y年%m月%d日%H時%M分%S秒')
+            
+            # 保存されているバックアップ先を取得（なければデフォルトのbackupsディレクトリ）
+            saved_backup_dir = self.config_manager.get('BACKUP_DIR')
+            default_backup_dir = saved_backup_dir if saved_backup_dir else os.path.join(SCRIPT_DIR, 'backups')
+            
+            # バックアップ先のディレクトリを選択
+            backup_dir = askdirectory(
+                initialdir=default_backup_dir,
+                title="YAMLルールファイルのバックアップ先を選択"
+            )
+            
+            if not backup_dir:  # キャンセルされた場合
+                return
+                
+            # バックアップ先をYAMLに保存
+            self.config_manager.set('BACKUP_DIR', backup_dir)
+            self.config_manager.save_config()
+            
+            os.makedirs(backup_dir, exist_ok=True)
+            backup_path = os.path.join(backup_dir, f'rename_rules.yaml.backup({timestamp})')
+
+            # ファイルをコピー
+            shutil.copy2(yaml_path, backup_path)
+            
+            logger.info(f"YAMLルールファイルをバックアップしました: {backup_path}")
+            self._add_to_status(f"YAMLルールファイルをバックアップしました: {backup_path}\n")
+            messagebox.showinfo("成功", f"YAMLルールファイルをバックアップしました:\n{backup_path}")
+
+        except Exception as e:
+            logger.exception("YAMLルールファイルのバックアップ中にエラーが発生しました")
+            messagebox.showerror("エラー", f"YAMLルールファイルのバックアップに失敗しました:\n{str(e)}")
 
 
 def main():
