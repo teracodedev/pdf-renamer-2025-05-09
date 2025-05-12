@@ -233,16 +233,85 @@ class PDFProcessor:
         """Load rename rules from YAML file."""
         try:
             yaml_path = self.config.get('YAML_FILE')
-            if not yaml_path or not os.path.exists(yaml_path):
-                raise FileNotFoundError(f"YAML file not found: {yaml_path}")
-                
-            with open(yaml_path, 'r', encoding='utf-8') as f:
-                self.yaml_rules = yaml.safe_load(f)
-                
-            logger.debug(f"YAML rules loaded from {yaml_path}")
+            logger.debug(f"YAMLファイルのパス: {yaml_path}")
             
+            if not yaml_path:
+                raise ValueError("YAMLファイルのパスが設定されていません")
+                
+            if not os.path.exists(yaml_path):
+                raise FileNotFoundError(f"YAMLファイルが見つかりません: {yaml_path}")
+                
+            logger.debug(f"YAMLファイルを読み込み中: {yaml_path}")
+            
+            try:
+                with open(yaml_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                    logger.debug(f"YAMLファイルの内容:\n{content[:500]}...")  # 最初の500文字を表示
+            except UnicodeDecodeError:
+                # UTF-8で読み込めない場合は、CP932（Windows日本語）で試行
+                with open(yaml_path, 'r', encoding='cp932') as f:
+                    content = f.read()
+                    logger.debug(f"YAMLファイルの内容 (CP932):\n{content[:500]}...")
+            
+            try:
+                self.yaml_rules = yaml.safe_load(content)
+            except yaml.YAMLError as e:
+                logger.error(f"YAMLの解析エラー: {e}")
+                raise ValueError(f"YAMLファイルの形式が不正です: {e}")
+                
+            if not self.yaml_rules:
+                raise ValueError("YAMLファイルが空です")
+                
+            if not isinstance(self.yaml_rules, dict):
+                raise ValueError("YAMLファイルのルート要素が辞書形式ではありません")
+                
+            if "ファイル命名のルール" not in self.yaml_rules:
+                raise ValueError("YAMLファイルに「ファイル命名のルール」セクションがありません")
+                
+            rules = self.yaml_rules["ファイル命名のルール"]
+            if not isinstance(rules, list):
+                raise ValueError("「ファイル命名のルール」がリスト形式ではありません")
+                
+            logger.debug(f"YAMLルールを読み込みました: {len(rules)}個のルール")
+            
+            # ルールの検証
+            valid_rules = []
+            for i, rule in enumerate(rules, 1):
+                if not rule:
+                    logger.warning(f"ルール {i} がNoneです")
+                    continue
+                    
+                if not isinstance(rule, dict):
+                    logger.warning(f"ルール {i} が辞書形式ではありません")
+                    continue
+                    
+                if "ルール" in rule:
+                    current_rule = rule["ルール"]
+                    if not isinstance(current_rule, dict):
+                        logger.warning(f"ルール {i} の「ルール」セクションが辞書形式ではありません")
+                        continue
+                else:
+                    current_rule = rule
+                    
+                if "正規表現" not in current_rule:
+                    logger.warning(f"ルール {i} に「正規表現」がありません")
+                    continue
+                    
+                if "命名ルール" not in current_rule:
+                    logger.warning(f"ルール {i} に「命名ルール」がありません")
+                    continue
+                    
+                valid_rules.append(rule)
+                logger.debug(f"ルール {i}: {current_rule.get('説明', 'Unnamed rule')}")
+            
+            if not valid_rules:
+                raise ValueError("有効なルールが1つも見つかりません")
+                
+            self.yaml_rules["ファイル命名のルール"] = valid_rules
+            logger.info(f"有効なルール {len(valid_rules)} 個を読み込みました")
+                
         except Exception as e:
-            logger.error(f"Error loading YAML rules: {e}")
+            logger.exception(f"Error loading YAML rules: {e}")
             self.status_queue.put(f"エラー: YAML設定の読み込みに失敗しました: {e}\n")
             self.yaml_rules = None
     
@@ -504,100 +573,52 @@ class PDFProcessor:
                 return f"{datetime.now().strftime('%Y年%m月%d日')}_エラー.pdf"
             
             rules = self.yaml_rules.get("ファイル命名のルール", [])
+            if not rules:
+                logger.error("No rules found in YAML")
+                return f"{datetime.now().strftime('%Y年%m月%d日')}_エラー.pdf"
+                
             logger.debug(f"Found {len(rules)} rules in YAML")
             
             # Normalize OCR result: fix common OCR errors
             ocr_result_normalized = self._normalize_ocr_result(ocr_result)
             
+            # 日付を抽出
+            western_date = self._extract_date(ocr_result_normalized)
+            format_params = {
+                "日付": western_date,
+                "担当者": self.selected_person,
+                "組織名": "不明",
+                "タイトル": "不明"
+            }
+            
             # YAMLルールに基づいて書類の種類を判定
             doc_type = None
             matching_rule = None
             
-            for rule in rules:
-                if "ルール" in rule:
-                    current_rule = rule["ルール"]
-                    if "正規表現" in current_rule:
-                        pattern = current_rule["正規表現"]
-                        if re.search(pattern, ocr_result_normalized, re.IGNORECASE):
-                            doc_type = current_rule.get("書類の種類")
-                            matching_rule = current_rule
-                            logger.info(f"書類の種類を判定: {doc_type}")
-                            break
-            
-            # 書類の種類に応じた処理
-            if doc_type == "火葬許可証":
-                death_date = self._extract_death_date(ocr_result_normalized)
-                name = self._extract_name(ocr_result_normalized)
-                if death_date and name:
-                    # 日付を西暦に変換
-                    western_date = self._convert_wareki_to_western(death_date)
-                    # 氏名のスペースを削除
-                    name = name.replace(" ", "")
-                    filename = f"{western_date}往生 {name}の火葬許可証.pdf"
-                    logger.info(f"火葬許可証のファイル名を生成: {filename}")
-                    return filename
-            elif doc_type == "火葬証明書":
-                cremation_date = self._extract_cremation_date(ocr_result_normalized)
-                name = self._extract_name(ocr_result_normalized)
-                if cremation_date and name:
-                    # 日付を西暦に変換
-                    western_date = self._convert_wareki_to_western(cremation_date)
-                    # 氏名のスペースを削除
-                    name = name.replace(" ", "")
-                    filename = f"{western_date} {name}の火葬証明書.pdf"
-                    logger.info(f"火葬証明書のファイル名を生成: {filename}")
-                    return filename
-            elif doc_type == "門徒誓約書":
-                # 提出日を抽出
-                submit_date = self._extract_submit_date(ocr_result_normalized)
-                # 氏名を抽出
-                name = self._extract_name(ocr_result_normalized)
-                if submit_date and name:
-                    # 氏名のスペースを削除
-                    name = name.replace(" ", "")
-                    filename = f"{submit_date}提出 {name}の門徒誓約書.pdf"
-                    logger.info(f"門徒誓約書のファイル名を生成: {filename}")
-                    return filename
-            
-            # その他の書類の処理
-            current_date = datetime.now().strftime('%Y年%m月%d日')
-            format_params = DefaultDict({
-                "担当者": self.selected_person.get(),
-                "日付": current_date,
-                "今日の日付": current_date,
-                "組織名": self.config.get('ORGANIZATION_NAME'),
-                "タイトル": self.config.get('TITLE'),
-                "内容": "不明",
-                "金額": "不明",
-                "取引先": "不明",
-                "申請者": "不明",
-                "年度": "不明",
-                "死亡年月日": current_date,
-                "火葬年月日": current_date,
-                "氏名": "不明"
-            })
-            
-            # Auto-assign person if needed
-            if self.selected_person.get() == "担当者自動設定":
-                format_params["担当者"] = self._auto_detect_person(ocr_result_normalized)
-            
-            # Extract a date from the OCR result
-            western_date = self._extract_date(ocr_result_normalized)
-            logger.debug(f"Extracted date: {western_date}")
-            
-            # Try to find a matching rule
-            for rule in rules:
+            for i, rule in enumerate(rules, 1):
+                if not rule:
+                    logger.warning(f"ルール {i} がNoneです")
+                    continue
+                    
                 current_rule = rule.get("ルール", rule) if "ルール" in rule else rule
-                logger.debug(f"Checking rule: {current_rule.get('説明', 'Unnamed rule')}")
+                if not current_rule:
+                    logger.warning(f"ルール {i} のcurrent_ruleがNoneです")
+                    continue
+                    
+                logger.debug(f"Checking rule {i}: {current_rule.get('説明', 'Unnamed rule')}")
                 
                 if "正規表現" in current_rule:
                     pattern = current_rule["正規表現"]
+                    logger.debug(f"Applying pattern: {pattern}")
+                    logger.debug(f"To text: {ocr_result_normalized[:200]}...")
                     match = re.search(pattern, ocr_result_normalized, re.IGNORECASE)
                     if match:
                         logger.info(f"ルールが一致しました: {current_rule.get('説明', 'Unnamed rule')}")
                         logger.info(f"適用された正規表現: {pattern}")
                         logger.info(f"マッチした文字列: {match.group(0)}")
                         return self._process_rule(current_rule, western_date, format_params, ocr_result_normalized)
+                    else:
+                        logger.debug(f"パターンに一致しませんでした: {pattern}")
             
             # Apply default rule if no specific rule matched
             logger.info("特定のルールに一致しませんでした。デフォルトルールを適用します。")
@@ -617,12 +638,20 @@ class PDFProcessor:
     def _normalize_ocr_result(self, ocr_result):
         """Normalize OCR result to fix common OCR errors."""
         # Replace misrecognized era names
-        normalized = re.sub(r'(今和|合和)', '令和', ocr_result)
+        normalized = re.sub(r'(今和|合和|令\s*和?|令\s*和)', '令和', ocr_result)
         
         # Fix common OCR errors with spaces
         normalized = re.sub(r'(\d)\s+(\d)', r'\1\2', normalized)  # Remove spaces between digits
         normalized = re.sub(r'年\s+(\d)', r'年\1', normalized)    # Fix "年 X" to "年X"
         normalized = re.sub(r'月\s+(\d)', r'月\1', normalized)    # Fix "月 X" to "月X"
+        
+        # Fix common OCR errors with era names
+        normalized = re.sub(r'令\s*(\d+)', r'令和\1', normalized)  # Fix "令 7" to "令和7"
+        normalized = re.sub(r'平\s*(\d+)', r'平成\1', normalized)  # Fix "平 7" to "平成7"
+        normalized = re.sub(r'昭\s*(\d+)', r'昭和\1', normalized)  # Fix "昭 7" to "昭和7"
+        
+        logger.debug(f"正規化前のOCR結果: {ocr_result[:200]}...")
+        logger.debug(f"正規化後のOCR結果: {normalized[:200]}...")
         
         return normalized
     
@@ -650,20 +679,22 @@ class PDFProcessor:
         """Extract a date from text and convert to YYYY年MM月DD日 format."""
         # Try various date formats
         
-        # 西暦YYYY年MM月DD日 format（優先度を上げる）
-        date_match = re.search(r'西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日', text)
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            return f"{year}年{month}月{day}日"
-            
-        # 令和〇年〇月〇日 format
+        # 令和〇年〇月〇日 format（優先度を上げる）
         date_match = re.search(r'令和\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日', text)
         if date_match:
             year = 2018 + int(date_match.group(1))
             month = date_match.group(2).zfill(2)
             day = date_match.group(3).zfill(2)
+            logger.debug(f"令和の日付を検出: {year}年{month}月{day}日")
+            return f"{year}年{month}月{day}日"
+            
+        # 令〇年〇月〇日 format（OCR誤認識対応）
+        date_match = re.search(r'令\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日', text)
+        if date_match:
+            year = 2018 + int(date_match.group(1))
+            month = date_match.group(2).zfill(2)
+            day = date_match.group(3).zfill(2)
+            logger.debug(f"令の日付を検出: {year}年{month}月{day}日")
             return f"{year}年{month}月{day}日"
             
         # 平成〇年〇月〇日 format
@@ -672,6 +703,7 @@ class PDFProcessor:
             year = 1988 + int(date_match.group(1))
             month = date_match.group(2).zfill(2)
             day = date_match.group(3).zfill(2)
+            logger.debug(f"平成の日付を検出: {year}年{month}月{day}日")
             return f"{year}年{month}月{day}日"
             
         # 昭和〇年〇月〇日 format
@@ -680,6 +712,7 @@ class PDFProcessor:
             year = 1925 + int(date_match.group(1))
             month = date_match.group(2).zfill(2)
             day = date_match.group(3).zfill(2)
+            logger.debug(f"昭和の日付を検出: {year}年{month}月{day}日")
             return f"{year}年{month}月{day}日"
             
         # YYYY年MM月DD日 format
@@ -688,6 +721,7 @@ class PDFProcessor:
             year = date_match.group(1)
             month = date_match.group(2).zfill(2)
             day = date_match.group(3).zfill(2)
+            logger.debug(f"西暦の日付を検出: {year}年{month}月{day}日")
             return f"{year}年{month}月{day}日"
             
         # YYYY/MM/DD or YYYY-MM-DD format
@@ -696,62 +730,220 @@ class PDFProcessor:
             year = date_match.group(1)
             month = date_match.group(2).zfill(2)
             day = date_match.group(3).zfill(2)
+            logger.debug(f"スラッシュ区切りの日付を検出: {year}年{month}月{day}日")
             return f"{year}年{month}月{day}日"
             
         # If no date found, use current date
-        return datetime.now().strftime('%Y年%m月%d日')
+        current_date = datetime.now().strftime('%Y年%m月%d日')
+        logger.debug(f"日付が見つからないため現在の日付を使用: {current_date}")
+        return current_date
     
     def _process_rule(self, rule, western_date, format_params, ocr_result):
-        """Process a single rule and return the filename."""
+        """Process a single rule and return the proposed filename."""
         try:
+            if not rule:
+                logger.warning("ルールがNoneです")
+                return f"{western_date}_不明.pdf"
+                
             doc_type = rule.get("書類の種類", "不明")
-            naming_rule = rule.get("命名ルール", "{日付}_{内容}")
-            logger.info(f"処理中の書類種類: {doc_type}")
-            logger.info(f"適用する命名ルール: {naming_rule}")
+            naming_rule = rule.get("命名ルール", "{日付} {担当者} {書類の種類}")
             
-            # プロンプトから情報を抽出
-            if "プロンプト" in rule:
-                prompt = rule["プロンプト"]
-                logger.info(f"プロンプトを処理中: {prompt}")
-                
-                # 死亡年月日と氏名を抽出
-                death_date = self._extract_death_date(ocr_result)
-                name = self._extract_name(ocr_result)
-                
-                if death_date:
-                    logger.info(f"抽出された死亡年月日: {death_date}")
-                    format_params["死亡年月日"] = death_date
-                if name:
-                    logger.info(f"抽出された氏名: {name}")
-                    format_params["氏名"] = name
-                
-                # その他の情報を抽出
-                for key in ["内容", "金額", "取引先", "申請者", "年度"]:
-                    if key in prompt:
-                        value = self._extract_value(ocr_result, key)
-                        if value:
-                            logger.info(f"抽出された{key}: {value}")
-                            format_params[key] = value
+            # 書類の種類に応じた処理
+            if doc_type == "請求書":
+                # 請求書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["組織名"] = organization
+                format_params["タイトル"] = "請求書"
+            elif doc_type == "領収書":
+                # 領収書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["組織名"] = organization
+                format_params["タイトル"] = "領収書"
+            elif doc_type == "見積書":
+                # 見積書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["組織名"] = organization
+                format_params["タイトル"] = "見積書"
+            elif doc_type == "契約書":
+                # 契約書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "契約書"
+                format_params["組織名"] = organization
+            elif doc_type == "納品書":
+                # 納品書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "納品書"
+                format_params["組織名"] = organization
+            elif doc_type == "注文書":
+                # 注文書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "注文書"
+                format_params["組織名"] = organization
+            elif doc_type == "請求書（葬儀）":
+                # 葬儀の請求書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "葬儀請求書"
+                format_params["組織名"] = organization
+            elif doc_type == "請求書（法事）":
+                # 法事の請求書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "法事請求書"
+                format_params["組織名"] = organization
+            elif doc_type == "請求書（仏壇）":
+                # 仏壇の請求書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "仏壇請求書"
+                format_params["組織名"] = organization
+            elif doc_type == "請求書（墓石）":
+                # 墓石の請求書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "墓石請求書"
+                format_params["組織名"] = organization
+            elif doc_type == "請求書（その他）":
+                # その他の請求書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "その他請求書"
+                format_params["組織名"] = organization
+            elif doc_type == "領収書（葬儀）":
+                # 葬儀の領収書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "葬儀領収書"
+                format_params["組織名"] = organization
+            elif doc_type == "領収書（法事）":
+                # 法事の領収書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "法事領収書"
+                format_params["組織名"] = organization
+            elif doc_type == "領収書（仏壇）":
+                # 仏壇の領収書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "仏壇領収書"
+                format_params["組織名"] = organization
+            elif doc_type == "領収書（墓石）":
+                # 墓石の領収書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "墓石領収書"
+                format_params["組織名"] = organization
+            elif doc_type == "領収書（その他）":
+                # その他の領収書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "その他領収書"
+                format_params["組織名"] = organization
+            elif doc_type == "見積書（葬儀）":
+                # 葬儀の見積書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "葬儀見積書"
+                format_params["組織名"] = organization
+            elif doc_type == "見積書（法事）":
+                # 法事の見積書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "法事見積書"
+                format_params["組織名"] = organization
+            elif doc_type == "見積書（仏壇）":
+                # 仏壇の見積書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "仏壇見積書"
+                format_params["組織名"] = organization
+            elif doc_type == "見積書（墓石）":
+                # 墓石の見積書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "墓石見積書"
+                format_params["組織名"] = organization
+            elif doc_type == "見積書（その他）":
+                # その他の見積書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "その他見積書"
+                format_params["組織名"] = organization
+            elif doc_type == "契約書（葬儀）":
+                # 葬儀の契約書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "葬儀契約書"
+                format_params["組織名"] = organization
+            elif doc_type == "契約書（法事）":
+                # 法事の契約書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "法事契約書"
+                format_params["組織名"] = organization
+            elif doc_type == "契約書（仏壇）":
+                # 仏壇の契約書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "仏壇契約書"
+                format_params["組織名"] = organization
+            elif doc_type == "契約書（墓石）":
+                # 墓石の契約書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "墓石契約書"
+                format_params["組織名"] = organization
+            elif doc_type == "契約書（その他）":
+                # その他の契約書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "その他契約書"
+                format_params["組織名"] = organization
+            elif doc_type == "納品書（葬儀）":
+                # 葬儀の納品書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "葬儀納品書"
+                format_params["組織名"] = organization
+            elif doc_type == "納品書（法事）":
+                # 法事の納品書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "法事納品書"
+                format_params["組織名"] = organization
+            elif doc_type == "納品書（仏壇）":
+                # 仏壇の納品書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "仏壇納品書"
+                format_params["組織名"] = organization
+            elif doc_type == "納品書（墓石）":
+                # 墓石の納品書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "墓石納品書"
+                format_params["組織名"] = organization
+            elif doc_type == "納品書（その他）":
+                # その他の納品書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "その他納品書"
+                format_params["組織名"] = organization
+            elif doc_type == "注文書（葬儀）":
+                # 葬儀の注文書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "葬儀注文書"
+                format_params["組織名"] = organization
+            elif doc_type == "注文書（法事）":
+                # 法事の注文書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "法事注文書"
+                format_params["組織名"] = organization
+            elif doc_type == "注文書（仏壇）":
+                # 仏壇の注文書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "仏壇注文書"
+                format_params["組織名"] = organization
+            elif doc_type == "注文書（墓石）":
+                # 墓石の注文書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "墓石注文書"
+                format_params["組織名"] = organization
+            elif doc_type == "注文書（その他）":
+                # その他の注文書の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = "その他注文書"
+                format_params["組織名"] = organization
+            else:
+                # その他の書類の場合は組織名を抽出
+                organization = self._extract_organization(ocr_result)
+                format_params["タイトル"] = doc_type
+                format_params["組織名"] = organization
             
-            # フォーマットパラメータをログ出力
-            logger.info("フォーマットパラメータ:")
-            for key, value in format_params.items():
-                logger.info(f"  {key}: {value}")
-            
-            # ファイル名を生成
+            # 命名ルールに従ってファイル名を生成
             try:
                 filename = naming_rule.format(**format_params)
-                logger.info(f"生成されたファイル名: {filename}")
-                
-                # PDF拡張子を追加
-                if not filename.lower().endswith('.pdf'):
-                    filename += '.pdf'
-                
-                return filename
+                logger.debug(f"Generated filename: {filename}")
+                return f"{filename}.pdf"
             except KeyError as e:
-                logger.error(f"フォーマットパラメータの不足: {e}")
-                return f"{western_date}_エラー.pdf"
-            
+                logger.error(f"Error formatting filename: {e}")
+                return f"{western_date}_{doc_type}.pdf"
+                
         except Exception as e:
             logger.exception("Error processing rule")
             return f"{western_date}_エラー.pdf"
