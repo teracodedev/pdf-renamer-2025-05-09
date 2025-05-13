@@ -228,17 +228,19 @@ class ConfigManager:
 class PDFProcessor:
     """OCRとAIを使用してPDFファイルを処理し、意味のあるファイル名を生成するクラス。"""
     
-    def __init__(self, config_manager, selected_person, status_queue):
+    def __init__(self, config_manager, selected_person, status_queue, business_card_mode=False):
         """PDFProcessorの初期化"""
         self.config_manager = config_manager
         self.selected_person = selected_person
         self.status_queue = status_queue
+        self.business_card_mode = business_card_mode
         self.yaml_rules = None
         self.load_yaml_rules()
         
         # ログの設定
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
+        logger.debug(f"名刺読み取りモード: {business_card_mode}")
         logger.debug(f"設定マネージャー: {config_manager}")
         
     def load_yaml_rules(self):
@@ -743,6 +745,13 @@ class PDFProcessor:
                 "タイトル": "不明"
             }
             
+            # 名刺読み取りモードの場合は名刺用のルールを無条件で適用
+            if self.business_card_mode:
+                logger.info("名刺読み取りモード: 名刺用のルールを適用します")
+                for rule in rules:
+                    if rule.get("書類の種類") == "名刺":
+                        return self._process_rule(rule, western_date, format_params, ocr_result_normalized)
+            
             # YAMLルールに基づいて書類の種類を判定
             doc_type = None
             matching_rule = None
@@ -888,32 +897,61 @@ class PDFProcessor:
         """ルールを処理し、ファイル名を生成します。"""
         try:
             logger.debug(f"ルール処理を開始: {rule.get('説明', 'Unnamed rule')}")
-            logger.debug(f"正規表現パターン: {rule.get('正規表現')}")
-            logger.debug(f"OCR結果: {ocr_result}")
+            
+            # 名刺の場合は特別な処理
+            if rule.get('書類の種類') == '名刺':
+                logger.debug(f"名刺の処理を開始: {ocr_result}")
+                
+                # AIに名刺情報の抽出を依頼
+                prompt = f"""
+                以下の名刺のOCR結果から、以下の情報を抽出してください：
 
-            # 正規表現でマッチング
-            pattern = rule.get('正規表現')
-            if not pattern:
-                logger.error("正規表現パターンが指定されていません")
-                return None
+                1. 氏名漢字：名刺に記載されている漢字の氏名
+                2. 氏名ふりがな：名刺に記載されているふりがな（括弧内の文字列）
+                3. 勤務先：会社名や組織名
+                4. 役職：役職名や学位
+                   - 役職は完全な形で抽出してください
+                   - 例：「特任准教授 博士（情報科学）」の場合、「特任准教授 博士（情報科学）」と完全に抽出してください
+                   - 「特任准教授」や「教授」「准教授」などの役職名は必ず含めてください
+                   - 学位（博士、修士など）がある場合は、役職と合わせて記載してください
+                   - 役職と学位の間は半角スペースで区切ってください
+                   - 注意：役職名は省略せず、完全な形で抽出してください
+                   - 注意：名刺に記載されている役職名は必ず含めてください
+                   - 注意：役職名が見つからない場合は、空文字列を返してください
+                   - 重要：「特任准教授」という役職名がある場合は、必ず「特任准教授」を含めてください
+                   - 重要：役職名は「特任准教授」「教授」「准教授」「講師」などの完全な形で抽出してください
+                   - 重要：役職名を省略したり、一部だけを抽出したりしないでください
 
-            match = re.search(pattern, ocr_result, re.IGNORECASE)
-            if not match:
-                logger.debug("正規表現パターンにマッチしませんでした")
-                return None
+                抽出した情報は以下のJSON形式で返してください：
+                {{
+                    "氏名漢字": "抽出した氏名漢字",
+                    "氏名ふりがな": "抽出したふりがな（括弧内の文字列）",
+                    "勤務先": "抽出した勤務先",
+                    "役職": "抽出した役職（学位を含む）"
+                }}
 
-            logger.debug("正規表現パターンにマッチしました")
+                OCR結果：
+                {ocr_result}
+                """
 
-            # 金額の抽出
-            amount_match = re.search(r'合計\s*([0-9,]+)', ocr_result)
-            amount = amount_match.group(1).replace(',', '') if amount_match else "不明"
-            logger.debug(f"抽出した金額: {amount}")
-
-            # フォーマットパラメータの準備
-            format_params = DefaultDict(format_params)
-            format_params['金額'] = amount
-            logger.debug(f"フォーマットパラメータ: {dict(format_params)}")
-
+                try:
+                    # OpenAI APIを呼び出して情報を抽出
+                    response = self._call_openai_api(prompt)
+                    if response:
+                        # JSON文字列をパース
+                        import json
+                        extracted_info = json.loads(response)
+                        
+                        # 抽出した情報をformat_paramsに設定
+                        format_params.update(extracted_info)
+                        logger.debug(f"AIによる名刺情報の抽出結果: {extracted_info}")
+                    else:
+                        logger.error("AIによる名刺情報の抽出に失敗しました")
+                        return None
+                except Exception as e:
+                    logger.error(f"AIによる名刺情報の抽出中にエラーが発生: {str(e)}")
+                    return None
+            
             # 命名ルールの取得
             naming_rule = rule.get('命名ルール')
             if not naming_rule:
@@ -1122,6 +1160,7 @@ class PDFRenamerApp:
         self.selected_person = tk.StringVar(value=self.config_manager.get('DEFAULT_PERSON'))
         self.selected_model = tk.StringVar(value=self.config_manager.get('OPENAI_MODEL'))
         self.processing_flag = tk.BooleanVar(value=False)
+        self.business_card_mode = tk.BooleanVar(value=False)  # 名刺読み取りモード用の変数を追加
         
         # UIのセットアップ
         self._setup_ui()
@@ -1276,6 +1315,14 @@ class PDFRenamerApp:
         # 設定メニュー
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="設定", menu=settings_menu)
+        
+        # 名刺読み取りモードの設定を追加
+        settings_menu.add_checkbutton(
+            label="名刺の読み取り",
+            variable=self.business_card_mode,
+            command=self._toggle_business_card_mode
+        )
+        settings_menu.add_separator()
         
         # .envバックアップメニュー
         settings_menu.add_command(label=".envをバックアップ", command=self._backup_env_file)
@@ -1455,7 +1502,12 @@ class PDFRenamerApp:
     def _process_pdf_files(self, pdf_folder, pdf_files):
         """別のスレッドですべてのPDFファイルを処理します。"""
         try:
-            processor = PDFProcessor(self.config_manager, self.selected_person, self.status_queue)
+            processor = PDFProcessor(
+                self.config_manager,
+                self.selected_person.get(),
+                self.status_queue,
+                self.business_card_mode.get()  # 名刺読み取りモードの状態を渡す
+            )
             
             total_files = len(pdf_files)
             completed = 0
@@ -1643,6 +1695,12 @@ class PDFRenamerApp:
         except Exception as e:
             logger.exception("YAMLルールファイルのバックアップ中にエラーが発生しました")
             messagebox.showerror("エラー", f"YAMLルールファイルのバックアップに失敗しました:\n{str(e)}")
+
+    def _toggle_business_card_mode(self):
+        """名刺読み取りモードの切り替えを処理します。"""
+        mode = "有効" if self.business_card_mode.get() else "無効"
+        logger.info(f"名刺読み取りモードを{mode}に設定")
+        self._add_to_status(f"名刺読み取りモードを{mode}に設定しました\n")
 
 
 def main():
