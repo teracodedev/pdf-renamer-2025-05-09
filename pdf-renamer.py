@@ -229,117 +229,67 @@ class PDFProcessor:
     """OCRとAIを使用してPDFファイルを処理し、意味のあるファイル名を生成するクラス。"""
     
     def __init__(self, config_manager, selected_person, status_queue, business_card_mode=False):
-        """PDFProcessorの初期化"""
+        """PDFProcessorを初期化します。"""
         self.config_manager = config_manager
         self.selected_person = selected_person
         self.status_queue = status_queue
-        self.business_card_mode = business_card_mode
+        self.business_card_mode = False  # デフォルトで名刺読み取りモードはオフ
         self.yaml_rules = None
         self.load_yaml_rules()
-        
-        # ログの設定
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
-        logger.debug(f"名刺読み取りモード: {business_card_mode}")
+        logger.debug(f"名刺読み取りモード: {self.business_card_mode}")
         logger.debug(f"設定マネージャー: {config_manager}")
         
     def load_yaml_rules(self):
-        """YAMLファイルからリネームルールを読み込みます。"""
+        """YAMLファイルからルールを読み込みます。"""
         try:
-            yaml_path = self.config_manager.get('YAML_FILE')
+            yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rename_rules.yaml')
             logger.debug(f"YAMLファイルのパス: {yaml_path}")
-            
-            if not yaml_path:
-                raise ValueError("YAMLファイルのパスが設定されていません")
-                
-            if not os.path.exists(yaml_path):
-                raise FileNotFoundError(f"YAMLファイルが見つかりません: {yaml_path}")
-                
             logger.debug(f"YAMLファイルを読み込み中: {yaml_path}")
-            
-            try:
-                with open(yaml_path, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                    logger.debug(f"YAMLファイルの内容:\n{content[:500]}...")  # 最初の500文字を表示
-            except UnicodeDecodeError:
-                # UTF-8で読み込めない場合は、CP932（Windows日本語）で試行
-                with open(yaml_path, 'r', encoding='cp932') as f:
-                    content = f.read()
-                    logger.debug(f"YAMLファイルの内容 (CP932):\n{content[:500]}...")
-            
-            try:
-                self.yaml_rules = yaml.safe_load(content)
-            except yaml.YAMLError as e:
-                logger.error(f"YAMLの解析エラー: {e}")
-                raise ValueError(f"YAMLファイルの形式が不正です: {e}")
-                
-            if not self.yaml_rules:
-                raise ValueError("YAMLファイルが空です")
-                
-            if not isinstance(self.yaml_rules, dict):
-                raise ValueError("YAMLファイルのルート要素が辞書形式ではありません")
-                
-            if "ファイル命名のルール" not in self.yaml_rules:
-                raise ValueError("YAMLファイルに「ファイル命名のルール」セクションがありません")
-                
-            rules = self.yaml_rules["ファイル命名のルール"]
+
+            if not os.path.exists(yaml_path):
+                logger.error(f"YAMLファイルが見つかりません: {yaml_path}")
+                return None
+
+            with open(yaml_path, 'r', encoding='utf-8') as f:
+                yaml_content = yaml.safe_load(f)
+                logger.debug("YAMLファイルの内容:")
+                logger.debug(yaml_content)
+
+            if not yaml_content or 'ファイル命名のルール' not in yaml_content:
+                logger.error("YAMLファイルの形式が不正です")
+                return None
+
+            rules = yaml_content['ファイル命名のルール']
             if not isinstance(rules, list):
-                raise ValueError("「ファイル命名のルール」がリスト形式ではありません")
-                
-            logger.debug(f"YAMLルールを読み込みました: {len(rules)}個のルール")
-            
-            # デフォルトルールの設定
-            default_rule = {
-                "ルール": {
-                    "説明": "デフォルトルール",
-                    "正規表現": ".*",
-                    "書類の種類": "その他",
-                    "命名ルール": "{日付} {担当者} {タイトル}"
-                }
-            }
-            
-            # ルールの検証
+                logger.error("ルールがリスト形式ではありません")
+                return None
+
             valid_rules = []
-            for i, rule in enumerate(rules, 1):
-                if not rule:
-                    logger.warning(f"ルール {i} がNoneです")
-                    continue
-                    
+            for rule in rules:
                 if not isinstance(rule, dict):
-                    logger.warning(f"ルール {i} が辞書形式ではありません")
+                    logger.warning(f"無効なルール形式をスキップします: {rule}")
                     continue
-                    
-                if "ルール" in rule:
-                    current_rule = rule["ルール"]
-                    if not isinstance(current_rule, dict):
-                        logger.warning(f"ルール {i} の「ルール」セクションが辞書形式ではありません")
-                        continue
-                else:
-                    current_rule = rule
-                    
-                if "正規表現" not in current_rule:
-                    logger.warning(f"ルール {i} に「正規表現」がありません")
+
+                required_fields = ['説明', '正規表現', '書類の種類', '命名ルール', 'プロンプト']
+                if not all(field in rule for field in required_fields):
+                    logger.warning(f"必須フィールドが不足しているルールをスキップします: {rule.get('説明', 'Unnamed rule')}")
                     continue
-                    
-                if "命名ルール" not in current_rule:
-                    logger.warning(f"ルール {i} に「命名ルール」がありません")
-                    continue
-                    
+
                 valid_rules.append(rule)
-                logger.debug(f"ルール {i}: {current_rule.get('説明', 'Unnamed rule')}")
-            
+                logger.debug(f"ルール {len(valid_rules)}: {rule.get('説明')}")
+
             if not valid_rules:
-                raise ValueError("有効なルールが1つも見つかりません")
-                
-            # デフォルトルールを追加
-            valid_rules.append(default_rule)
-            self.yaml_rules["ファイル命名のルール"] = valid_rules
+                logger.error("有効なルールが見つかりませんでした")
+                return None
+
             logger.info(f"有効なルール {len(valid_rules)} 個を読み込みました（デフォルトルール含む）")
-                
+            return valid_rules
+
         except Exception as e:
-            logger.exception(f"YAMLルールの読み込みエラー: {e}")
-            self.status_queue.put(f"エラー: YAML設定の読み込みに失敗しました: {e}\n")
-            self.yaml_rules = None
+            logger.error(f"YAMLファイルの読み込み中にエラーが発生しました: {str(e)}")
+            return None
     
     def process_pdf(self, pdf_file_path):
         """単一のPDFファイルを処理します：画像に変換、OCR、リネーム。"""
@@ -714,87 +664,53 @@ class PDFProcessor:
             return "不明"
 
     def _propose_file_name(self, ocr_result):
-        """OCR結果とYAMLルールに基づいてファイル名を提案します。"""
+        """OCR結果からファイル名を提案します。"""
         try:
-            logger.debug("OCR結果に基づいてファイル名を提案中")
-            
-            if not ocr_result or ocr_result.strip() == "":
-                logger.error("OCR結果が空です")
-                return f"{datetime.now().strftime('%Y年%m月%d日')}_不明.pdf"
-            
-            if not self.yaml_rules:
-                logger.error("YAMLルールが読み込まれていません")
-                return f"{datetime.now().strftime('%Y年%m月%d日')}_エラー.pdf"
-            
-            rules = self.yaml_rules.get("ファイル命名のルール", [])
+            logger.debug("ファイル名の提案を開始します")
+            logger.debug(f"OCR結果: {ocr_result}")
+
+            # OCR結果を正規化
+            normalized_text = self._normalize_ocr_result(ocr_result)
+            logger.debug(f"正規化後のOCR結果: {normalized_text}")
+
+            # YAMLルールを読み込む
+            rules = self.load_yaml_rules()
             if not rules:
-                logger.error("YAMLにルールが見つかりません")
-                return f"{datetime.now().strftime('%Y年%m月%d日')}_エラー.pdf"
-                
-            logger.debug(f"YAMLに{len(rules)}個のルールが見つかりました")
-            
-            # OCR結果の正規化：一般的なOCRエラーを修正
-            ocr_result_normalized = self._normalize_ocr_result(ocr_result)
-            
-            # 日付を抽出
-            western_date = self._extract_date(ocr_result_normalized)
-            format_params = {
-                "日付": western_date,
-                "担当者": self.selected_person,
-                "組織名": "不明",
-                "タイトル": "不明"
-            }
-            
-            # 名刺読み取りモードの場合は名刺用のルールを無条件で適用
+                logger.error("YAMLルールの読み込みに失敗しました")
+                return None
+
+            # 名刺読み取りモードの場合
             if self.business_card_mode:
-                logger.info("名刺読み取りモード: 名刺用のルールを適用します")
+                logger.debug("名刺読み取りモードで処理します")
                 for rule in rules:
-                    if rule.get("書類の種類") == "名刺":
-                        return self._process_rule(rule, western_date, format_params, ocr_result_normalized)
-            
-            # YAMLルールに基づいて書類の種類を判定
-            doc_type = None
-            matching_rule = None
-            
-            for i, rule in enumerate(rules, 1):
-                if not rule:
-                    logger.warning(f"ルール {i} がNoneです")
-                    continue
-                    
-                current_rule = rule.get("ルール", rule) if "ルール" in rule else rule
-                if not current_rule:
-                    logger.warning(f"ルール {i} のcurrent_ruleがNoneです")
-                    continue
-                    
-                logger.debug(f"ルール {i} をチェック中: {current_rule.get('説明', 'Unnamed rule')}")
-                
-                if "正規表現" in current_rule:
-                    pattern = current_rule["正規表現"]
-                    logger.debug(f"パターンを適用中: {pattern}")
-                    logger.debug(f"テキスト: {ocr_result_normalized[:200]}...")
-                    match = re.search(pattern, ocr_result_normalized, re.IGNORECASE)
-                    if match:
-                        logger.info(f"ルールが一致しました: {current_rule.get('説明', 'Unnamed rule')}")
-                        logger.info(f"適用された正規表現: {pattern}")
-                        logger.info(f"マッチした文字列: {match.group(0)}")
-                        return self._process_rule(current_rule, western_date, format_params, ocr_result_normalized)
-                    else:
-                        logger.debug(f"パターンに一致しませんでした: {pattern}")
-            
-            # 特定のルールに一致しない場合はデフォルトルールを適用
-            logger.info("特定のルールに一致しませんでした。デフォルトルールを適用します。")
-            default_rule_dict = next((r for r in rules if "デフォルト" in r), {})
-            default_rule = default_rule_dict.get("デフォルト", {})
-            
-            if not default_rule:
-                logger.warning("デフォルトルールが見つかりませんでした")
-                return f"{western_date}_不明.pdf"
-            
-            return self._process_rule(default_rule, western_date, format_params, ocr_result_normalized)
-            
+                    if rule.get('書類の種類') == '名刺':
+                        logger.debug(f"名刺ルールを適用します: {rule.get('説明')}")
+                        return self._process_rule(rule, None, {}, ocr_result)
+                logger.warning("名刺ルールが見つかりませんでした")
+                return None
+
+            # 通常モードの場合
+            logger.debug("通常モードで処理します")
+            for rule in rules:
+                if rule.get('書類の種類') != '名刺':  # 名刺以外のルールをチェック
+                    pattern = rule.get('正規表現')
+                    if pattern and re.search(pattern, normalized_text):
+                        logger.debug(f"ルールに一致しました: {rule.get('説明')}")
+                        return self._process_rule(rule, None, {}, ocr_result)
+
+            # どのルールにも一致しない場合、デフォルトルールを探す
+            logger.debug("通常のルールに一致しなかったため、デフォルトルールを探します")
+            for rule in rules:
+                if rule.get('説明') == 'どのルールにも該当しない場合':
+                    logger.debug("デフォルトルールを適用します")
+                    return self._process_rule(rule, None, {}, ocr_result)
+
+            logger.warning("デフォルトルールも見つかりませんでした")
+            return None
+
         except Exception as e:
-            logger.exception("ファイル名提案エラー")
-            return f"{datetime.now().strftime('%Y年%m月%d日')}_エラー.pdf"
+            logger.error(f"ファイル名の提案中にエラーが発生しました: {str(e)}")
+            return None
     
     def _normalize_ocr_result(self, ocr_result):
         """OCR結果を正規化します。"""
@@ -894,85 +810,77 @@ class PDFProcessor:
         return current_date
     
     def _process_rule(self, rule, western_date, format_params, ocr_result):
-        """ルールを処理し、ファイル名を生成します。"""
+        """ルールに基づいてファイル名を生成します。"""
         try:
-            logger.debug(f"ルール処理を開始: {rule.get('説明', 'Unnamed rule')}")
+            logger.debug(f"ルール処理を開始: {rule.get('説明')}")
             
-            # 名刺の場合は特別な処理
-            if rule.get('書類の種類') == '名刺':
-                logger.debug(f"名刺の処理を開始: {ocr_result}")
+            # デフォルトルールの場合
+            if rule.get('説明') == 'どのルールにも該当しない場合':
+                # 日付の抽出
+                date = self._extract_date(ocr_result)
+                if not date:
+                    date = "不明"
                 
-                # AIに名刺情報の抽出を依頼
-                prompt = f"""
-                以下の名刺のOCR結果から、以下の情報を抽出してください：
-
-                1. 氏名漢字：名刺に記載されている漢字の氏名
-                2. 氏名ふりがな：名刺に記載されているふりがな（括弧内の文字列）
-                3. 勤務先：会社名や組織名
-                4. 役職：役職名や学位
-                   - 役職は完全な形で抽出してください
-                   - 例：「特任准教授 博士（情報科学）」の場合、「特任准教授 博士（情報科学）」と完全に抽出してください
-                   - 「特任准教授」や「教授」「准教授」などの役職名は必ず含めてください
-                   - 学位（博士、修士など）がある場合は、役職と合わせて記載してください
-                   - 役職と学位の間は半角スペースで区切ってください
-                   - 注意：役職名は省略せず、完全な形で抽出してください
-                   - 注意：名刺に記載されている役職名は必ず含めてください
-                   - 注意：役職名が見つからない場合は、空文字列を返してください
-                   - 重要：「特任准教授」という役職名がある場合は、必ず「特任准教授」を含めてください
-                   - 重要：役職名は「特任准教授」「教授」「准教授」「講師」などの完全な形で抽出してください
-                   - 重要：役職名を省略したり、一部だけを抽出したりしないでください
-
-                抽出した情報は以下のJSON形式で返してください：
-                {{
-                    "氏名漢字": "抽出した氏名漢字",
-                    "氏名ふりがな": "抽出したふりがな（括弧内の文字列）",
-                    "勤務先": "抽出した勤務先",
-                    "役職": "抽出した役職（学位を含む）"
-                }}
-
-                OCR結果：
-                {ocr_result}
-                """
-
+                # 組織名の抽出
+                organization = self._extract_organization(ocr_result)
+                if not organization:
+                    organization = "不明"
+                
+                # タイトルの抽出（最初の行またはタイトルと思われる行）
+                lines = ocr_result.split('\n')
+                title = None
+                for line in lines:
+                    if line.strip() and not line.startswith('和') and not line.startswith('平'):
+                        title = line.strip()
+                        break
+                if not title:
+                    title = "不明"
+                
+                # 担当者の処理
+                person = self.selected_person
+                if person == "担当者自動設定":
+                    person = self._auto_detect_person(ocr_result)
+                
+                # フォーマットパラメータの設定
+                format_params = {
+                    '日付': date,
+                    '組織名': organization,
+                    'タイトル': title,
+                    '担当者': person
+                }
+                
+                logger.debug(f"抽出した情報: {format_params}")
+                
+                # ファイル名の生成
                 try:
-                    # OpenAI APIを呼び出して情報を抽出
-                    response = self._call_openai_api(prompt)
-                    if response:
-                        # JSON文字列をパース
-                        import json
-                        extracted_info = json.loads(response)
-                        
-                        # 抽出した情報をformat_paramsに設定
-                        format_params.update(extracted_info)
-                        logger.debug(f"AIによる名刺情報の抽出結果: {extracted_info}")
-                    else:
-                        logger.error("AIによる名刺情報の抽出に失敗しました")
-                        return None
-                except Exception as e:
-                    logger.error(f"AIによる名刺情報の抽出中にエラーが発生: {str(e)}")
+                    file_name = rule.get('命名ルール').format(**format_params)
+                    logger.debug(f"生成されたファイル名: {file_name}")
+                    return file_name
+                except KeyError as e:
+                    logger.error(f"フォーマットパラメータの不足: {str(e)}")
                     return None
             
-            # 命名ルールの取得
-            naming_rule = rule.get('命名ルール')
-            if not naming_rule:
-                logger.error("命名ルールが指定されていません")
+            # その他のルールの場合（既存の処理）
+            prompt = rule.get('プロンプト', '')
+            if not prompt:
+                logger.error("プロンプトが見つかりません")
                 return None
-
-            # ファイル名の生成
-            try:
-                new_name = naming_rule.format(**format_params)
-                logger.debug(f"生成されたファイル名: {new_name}")
-                return new_name
-            except KeyError as e:
-                logger.error(f"フォーマットパラメータの不足: {e}")
+            
+            # プロンプトの置換
+            prompt = prompt.replace('{書類の種類}', rule.get('書類の種類', '不明'))
+            prompt = prompt.replace('{命名ルール}', rule.get('命名ルール', ''))
+            prompt = prompt.replace('{ocr_result}', ocr_result)
+            
+            # OpenAI APIの呼び出し
+            file_name = self._call_openai_api(prompt)
+            if not file_name:
+                logger.error("OpenAI APIからの応答がありません")
                 return None
-            except Exception as e:
-                logger.error(f"ファイル名生成中にエラーが発生: {e}")
-                return None
-
+            
+            return file_name
+            
         except Exception as e:
             logger.error(f"ルール処理中にエラーが発生しました: {str(e)}")
-            logger.exception("詳細なエラー情報:")
             return None
     
     def _extract_value(self, text, key):
