@@ -233,7 +233,7 @@ class PDFProcessor:
         self.config_manager = config_manager
         self.selected_person = selected_person
         self.status_queue = status_queue
-        self.business_card_mode = False  # デフォルトで名刺読み取りモードはオフ
+        self.business_card_mode = business_card_mode  # ← こうする
         self.yaml_rules = None
         self.load_yaml_rules()
         logger.debug("PDFProcessorを初期化しました")
