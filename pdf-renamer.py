@@ -1195,13 +1195,6 @@ class PDFRenamerApp:
         )
         self.rename_button.pack(side=tk.LEFT, padx=(0, 10))
         
-        self.open_folder_button = ttk.Button(
-            button_frame,
-            text="フォルダを開く",
-            command=lambda: self._open_file(self.folder_var.get())
-        )
-        self.open_folder_button.pack(side=tk.LEFT)
-        
         # ステータスキューのポーリングを開始
         self._poll_status_queue()
     
