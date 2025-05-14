@@ -1193,7 +1193,7 @@ class PDFRenamerApp:
             text="リネーム開始",
             command=self._start_renaming
         )
-        self.rename_button.pack(side=tk.LEFT, padx=(0, 10))
+        self.rename_button.pack(side=tk.RIGHT, padx=(0, 10))
         
         # ステータスキューのポーリングを開始
         self._poll_status_queue()
