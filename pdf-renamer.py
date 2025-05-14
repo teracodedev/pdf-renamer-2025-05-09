@@ -1384,6 +1384,8 @@ class PDFRenamerApp:
         self._add_to_status(f"PDFフォルダ: {pdf_folder}\n")
         self._add_to_status(f"PDF数: {len(pdf_files)}個\n")
         self._add_to_status(f"担当者: {self.selected_person.get()}\n")
+        if self.business_card_mode.get():
+            self._add_to_status("名刺読み取りモードで処理します。\n")
         self._add_to_status("リネーム処理を開始します...\n")
         self._add_to_status("-" * 50 + "\n")
         
