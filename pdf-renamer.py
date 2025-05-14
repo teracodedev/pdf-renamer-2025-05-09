@@ -254,8 +254,8 @@ class PDFProcessor:
 
             with open(yaml_path, 'r', encoding='utf-8') as f:
                 yaml_content = yaml.safe_load(f)
-                logger.debug("YAMLファイルの内容:")
-                logger.debug(yaml_content)
+                # logger.debug("YAMLファイルの内容:")
+                # logger.debug(yaml_content)
 
             if not yaml_content or 'ファイル命名のルール' not in yaml_content:
                 logger.error("YAMLファイルの形式が不正です")
