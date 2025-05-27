@@ -812,77 +812,41 @@ class PDFProcessor:
     def _process_rule(self, rule, western_date, format_params, ocr_result):
         """ルールに基づいてファイル名を生成します。"""
         try:
-            logger.debug(f"ルール処理を開始: {rule.get('説明')}")
-            
-            # デフォルトルールの場合
-            if rule.get('説明') == 'どのルールにも該当しない場合':
-                # 日付の抽出
-                date = self._extract_date(ocr_result)
-                if not date:
-                    date = "不明"
-                
-                # 組織名の抽出
-                organization = self._extract_organization(ocr_result)
-                if not organization:
-                    organization = "不明"
-                
-                # タイトルの抽出（最初の行またはタイトルと思われる行）
-                lines = ocr_result.split('\n')
-                title = None
-                for line in lines:
-                    if line.strip() and not line.startswith('和') and not line.startswith('平'):
-                        title = line.strip()
-                        break
-                if not title:
-                    title = "不明"
-                
-                # 担当者の処理
-                person = self.selected_person
-                if person == "担当者自動設定":
-                    person = self._auto_detect_person(ocr_result)
-                
-                # フォーマットパラメータの設定
-                format_params = {
-                    '日付': date,
-                    '組織名': organization,
-                    'タイトル': title,
-                    '担当者': person
-                }
-                
-                logger.debug(f"抽出した情報: {format_params}")
-                
-                # ファイル名の生成
-                try:
-                    file_name = rule.get('命名ルール').format(**format_params)
-                    logger.debug(f"生成されたファイル名: {file_name}")
-                    return file_name
-                except KeyError as e:
-                    logger.error(f"フォーマットパラメータの不足: {str(e)}")
-                    return None
-            
-            # その他のルールの場合（既存の処理）
+            # プロンプトの置換
             prompt = rule.get('プロンプト', '')
             if not prompt:
                 logger.error("プロンプトが見つかりません")
                 return None
             
-            # プロンプトの置換
             prompt = prompt.replace('{書類の種類}', rule.get('書類の種類', '不明'))
             prompt = prompt.replace('{命名ルール}', rule.get('命名ルール', ''))
             prompt = prompt.replace('{ocr_result}', ocr_result)
             
+            # 日付フォーマットの指示を追加
+            prompt += "\n\n注意: 日付は必ず「YYYY年MM月DD日」形式で出力してください。"
+            
             # OpenAI APIの呼び出し
-            file_name = self._call_openai_api(prompt)
-            if not file_name:
+            response = self._call_openai_api(prompt)
+            if not response:
                 logger.error("OpenAI APIからの応答がありません")
                 return None
             
-            return file_name
+            # 応答からファイル名を抽出
+            # 最後の行を取得（通常、ファイル名は最後の行にあります）
+            lines = response.strip().split('\n')
+            file_name = lines[-1].strip()
             
+            # ファイル名が空でないことを確認
+            if not file_name:
+                logger.error("生成されたファイル名が空です")
+                return None
+            
+            return file_name
+        
         except Exception as e:
             logger.error(f"ルール処理中にエラーが発生しました: {str(e)}")
             return None
-    
+
     def _extract_value(self, text, key):
         """OCRテキストから特定の値を抽出します。"""
         patterns = {
@@ -1035,7 +999,7 @@ class PDFProcessor:
             response = client.chat.completions.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "あなたはPDFファイルの名前を生成するアシスタントです。与えられたOCR結果から適切な情報を抽出し、指定された形式でファイル名を生成してください。"},
+                    {"role": "system", "content": "あなたはPDFファイルの名前を生成するアシスタントです。与えられたOCR結果から適切な情報を抽出し、指定された形式でファイル名を生成してください。日付は必ず「YYYY年MM月DD日」形式で出力してください。ファイル名のみを返してください。"},
                     {"role": "user", "content": prompt}
                 ],
                 temperature=0.3,
