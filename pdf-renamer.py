@@ -355,10 +355,12 @@ class PDFProcessor:
             kwargs = {
                 'first_page': 1,
                 'last_page': 1,
-                'dpi': 400,  # OCR結果向上のため解像度を上げる
-                'grayscale': False,  # カラー画像を使用
-                'thread_count': 1,  # スレッド数を制限して安定性を向上
+                'dpi': 300,  # OCR結果と処理速度のバランスを考慮して300に下げる
+                'grayscale': True,  # グレースケールにすることで処理を高速化
+                'thread_count': os.cpu_count() or 4,  # 利用可能なCPUコア数を使用
                 'use_pdftocairo': True,  # pdftocairoを使用して品質を向上
+                'fmt': 'jpeg',  # 明示的にJPEG形式を指定
+                'jpegopt': {'quality': 85, 'optimize': True}  # JPEG品質を最適化
             }
             
             if poppler_path:
@@ -369,7 +371,7 @@ class PDFProcessor:
                 if not images:
                     raise ValueError("PDFから画像が抽出されませんでした")
                     
-                images[0].save(temp_jpeg_path, 'JPEG', quality=95)  # OCR向上のため高品質に設定
+                images[0].save(temp_jpeg_path, 'JPEG', quality=85, optimize=True)  # 品質を最適化
                 logger.debug(f"PDFをJPEGに変換しました: {temp_jpeg_path}")
                 return temp_jpeg_path
                 
@@ -403,13 +405,17 @@ class PDFProcessor:
             
             # 日本語のヒントを設定
             image_context = vision.ImageContext(
-                language_hints=["ja"]
+                language_hints=["ja"],
+                text_detection_params=vision.TextDetectionParams(
+                    enable_text_detection_confidence_score=True
+                )
             )
             
             # document_text_detectionを使用して日本語テキストの認識精度を向上
             response = client.document_text_detection(
                 image=image,
-                image_context=image_context
+                image_context=image_context,
+                timeout=30  # タイムアウトを30秒に設定
             )
             
             # エラーをチェック
@@ -420,8 +426,11 @@ class PDFProcessor:
             if response.text_annotations:
                 result = response.text_annotations[0].description
                 logger.debug(f"OCRに成功し、{len(result)}文字を抽出しました")
-                # OCR結果をログファイルに出力
-                logger.info(f"OCR結果:\n{'-' * 50}\n{result}\n{'-' * 50}")
+                # OCR結果をログファイルに出力（長すぎる場合は省略）
+                if len(result) > 500:
+                    logger.info(f"OCR結果:\n{'-' * 50}\n{result[:500]}...\n{'-' * 50}")
+                else:
+                    logger.info(f"OCR結果:\n{'-' * 50}\n{result}\n{'-' * 50}")
                 return result
             else:
                 logger.warning(f"画像内にテキストが検出されませんでした: {image_path}")
@@ -994,16 +1003,27 @@ class PDFProcessor:
             model = self.config_manager.get('OPENAI_MODEL', 'gpt-4')
             logger.debug(f"使用するモデル: {model}")
 
+            # プロンプトを最適化
+            optimized_prompt = f"""
+            以下のOCR結果から、指定された形式でファイル名を生成してください。
+            ファイル名のみを返してください。余計な説明は不要です。
+            日付は必ず「YYYY年MM月DD日」形式で出力してください。
+
+            OCR結果:
+            {prompt}
+            """
+
             # APIリクエストの送信
             logger.debug("APIリクエストを送信します")
             response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "あなたはPDFファイルの名前を生成するアシスタントです。与えられたOCR結果から適切な情報を抽出し、指定された形式でファイル名を生成してください。日付は必ず「YYYY年MM月DD日」形式で出力してください。ファイル名のみを返してください。"},
-                    {"role": "user", "content": prompt}
+                    {"role": "user", "content": optimized_prompt}
                 ],
-                temperature=0.3,
-                max_tokens=150
+                temperature=0.2,  # より一貫性のある結果を得るために温度を下げる
+                max_tokens=100,   # トークン数を制限
+                timeout=30        # タイムアウトを30秒に設定
             )
 
             # レスポンスからテキストを抽出
@@ -1380,35 +1400,47 @@ class PDFRenamerApp:
             completed = 0
             successful = 0
             
-            # 最適なワーカー数を計算
-            max_workers = min(os.cpu_count() or 4, 4)  # APIレート制限を避けるために4ワーカーに制限
+            # 最適なワーカー数を計算（APIレート制限を考慮）
+            max_workers = min(os.cpu_count() or 4, 8)  # 最大8ワーカーまで許可
+            
+            # バッチサイズを設定（APIレート制限を考慮）
+            batch_size = 4
+            
+            # ファイルをバッチに分割
+            batches = [pdf_files[i:i + batch_size] for i in range(0, len(pdf_files), batch_size)]
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = {
-                    executor.submit(
-                        processor.process_pdf, 
-                        os.path.join(pdf_folder, pdf_file)
-                    ): pdf_file 
-                    for pdf_file in pdf_files
-                }
-                
-                for future in as_completed(futures):
-                    try:
-                        result = future.result()
-                        if result:
-                            successful += 1
-                    except Exception as e:
-                        pdf_file = futures[future]
-                        error_msg = f"処理エラー: {pdf_file} - {str(e)}\n"
-                        logger.error(error_msg)
-                        self.status_queue.put(error_msg)
-                        
-                    completed += 1
-                    progress_value = (completed / total_files) * 100
+                for batch in batches:
+                    # バッチ内のファイルを並列処理
+                    futures = {
+                        executor.submit(
+                            processor.process_pdf, 
+                            os.path.join(pdf_folder, pdf_file)
+                        ): pdf_file 
+                        for pdf_file in batch
+                    }
                     
-                    # スレッドセーフな方法でUIを更新
-                    self.root.after(0, lambda val=progress_value: 
-                        self._update_progress(val, completed, successful, total_files))
+                    # バッチの完了を待機
+                    for future in as_completed(futures):
+                        try:
+                            result = future.result()
+                            if result:
+                                successful += 1
+                        except Exception as e:
+                            pdf_file = futures[future]
+                            error_msg = f"処理エラー: {pdf_file} - {str(e)}\n"
+                            logger.error(error_msg)
+                            self.status_queue.put(error_msg)
+                            
+                        completed += 1
+                        progress_value = (completed / total_files) * 100
+                        
+                        # スレッドセーフな方法でUIを更新
+                        self.root.after(0, lambda val=progress_value: 
+                            self._update_progress(val, completed, successful, total_files))
+                    
+                    # バッチ間で少し待機（APIレート制限を考慮）
+                    time.sleep(1)
             
             # 最終ステータス更新
             summary = (
