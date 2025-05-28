@@ -54,6 +54,14 @@ APP_VERSION = "2025年5月10日バージョン"
 # ログの設定
 log_file_path = os.path.join(SCRIPT_DIR, "pdf-renamer.log")
 
+# 既存のログファイルを削除
+if os.path.exists(log_file_path):
+    try:
+        os.remove(log_file_path)
+        print(f"既存のログファイルを削除しました: {log_file_path}")
+    except Exception as e:
+        print(f"ログファイルの削除に失敗しました: {e}")
+
 # 既存のハンドラーをクリア
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
@@ -63,7 +71,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),  # mode='w'で毎回新規作成
+        logging.FileHandler(log_file_path, encoding="utf-8"),  # mode='w'は不要（新規作成）
         logging.StreamHandler()
     ]
 )
