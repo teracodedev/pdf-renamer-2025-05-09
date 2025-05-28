@@ -835,10 +835,11 @@ class PDFProcessor:
             prompt = prompt.replace('{書類の種類}', rule.get('書類の種類', '不明'))
             prompt = prompt.replace('{命名ルール}', rule.get('命名ルール', ''))
             prompt = prompt.replace('{ocr_result}', ocr_result)
-            prompt = prompt.replace('{担当者}', self.selected_person)  # 担当者名を追加
+            prompt = prompt.replace('{担当者}', self.selected_person)
             
             # 日付フォーマットの指示を追加
             prompt += "\n\n注意: 日付は必ず「YYYY年MM月DD日」形式で出力してください。"
+            prompt += "\n注意: ファイル名の各要素（日付、取引先、内容、金額など）の間には必ず半角スペースを入れてください。"
             
             # OpenAI APIの呼び出し
             response = self._call_openai_api(prompt)
@@ -855,6 +856,22 @@ class PDFProcessor:
             if not file_name:
                 logger.error("生成されたファイル名が空です")
                 return None
+            
+            # 連続する半角スペースを1つに置換
+            file_name = re.sub(r'\s+', ' ', file_name)
+            
+            # 各要素間に半角スペースを強制的に入れる
+            # 日付の後
+            file_name = re.sub(r'(\d{4}年\d{2}月\d{2}日)(?!\s)', r'\1 ', file_name)
+            # 「より」の後
+            file_name = re.sub(r'(より)(?!\s)', r'\1 ', file_name)
+            # 金額の前
+            file_name = re.sub(r'(?<!\s)(金額)', r' \1', file_name)
+            # 円の後
+            file_name = re.sub(r'(円)(?!\s)', r'\1 ', file_name)
+            
+            # 最後の連続する半角スペースを1つに置換
+            file_name = re.sub(r'\s+', ' ', file_name)
             
             return file_name
         
