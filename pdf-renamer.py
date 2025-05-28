@@ -835,6 +835,7 @@ class PDFProcessor:
             prompt = prompt.replace('{書類の種類}', rule.get('書類の種類', '不明'))
             prompt = prompt.replace('{命名ルール}', rule.get('命名ルール', ''))
             prompt = prompt.replace('{ocr_result}', ocr_result)
+            prompt = prompt.replace('{担当者}', self.selected_person)  # 担当者名を追加
             
             # 日付フォーマットの指示を追加
             prompt += "\n\n注意: 日付は必ず「YYYY年MM月DD日」形式で出力してください。"
