@@ -1530,7 +1530,7 @@ class PDFRenamerApp:
             timestamp = datetime.now().strftime('%Y年%m月%d日%H時%M分%S秒')
             
             # 保存されているバックアップ先を取得（なければデフォルトのbackupsディレクトリ）
-            saved_backup_dir = self.config_manager.get('BACKUP_DIR')
+            saved_backup_dir = self.config_manager.get('ENV_BACKUP_DIR')
             default_backup_dir = saved_backup_dir if saved_backup_dir else os.path.join(SCRIPT_DIR, 'backups')
             
             # バックアップ先のディレクトリを選択
@@ -1543,7 +1543,7 @@ class PDFRenamerApp:
                 return
                 
             # バックアップ先を.envに保存
-            self.config_manager.set('BACKUP_DIR', backup_dir)
+            self.config_manager.set('ENV_BACKUP_DIR', backup_dir)
             self.config_manager.save_config()
             
             os.makedirs(backup_dir, exist_ok=True)
@@ -1572,7 +1572,7 @@ class PDFRenamerApp:
             timestamp = datetime.now().strftime('%Y年%m月%d日%H時%M分%S秒')
             
             # 保存されているバックアップ先を取得（なければデフォルトのbackupsディレクトリ）
-            saved_backup_dir = self.config_manager.get('BACKUP_DIR')
+            saved_backup_dir = self.config_manager.get('YAML_BACKUP_DIR')
             default_backup_dir = saved_backup_dir if saved_backup_dir else os.path.join(SCRIPT_DIR, 'backups')
             
             # バックアップ先のディレクトリを選択
@@ -1584,8 +1584,8 @@ class PDFRenamerApp:
             if not backup_dir:  # キャンセルされた場合
                 return
                 
-            # バックアップ先をYAMLに保存
-            self.config_manager.set('BACKUP_DIR', backup_dir)
+            # バックアップ先を.envに保存
+            self.config_manager.set('YAML_BACKUP_DIR', backup_dir)
             self.config_manager.save_config()
             
             os.makedirs(backup_dir, exist_ok=True)
