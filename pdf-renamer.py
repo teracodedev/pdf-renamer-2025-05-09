@@ -262,8 +262,6 @@ class PDFProcessor:
 
             with open(yaml_path, 'r', encoding='utf-8') as f:
                 yaml_content = yaml.safe_load(f)
-                # logger.debug("YAMLファイルの内容:")
-                # logger.debug(yaml_content)
 
             if not yaml_content or 'ファイル命名のルール' not in yaml_content:
                 logger.error("YAMLファイルの形式が不正です")
@@ -286,13 +284,12 @@ class PDFProcessor:
                     continue
 
                 valid_rules.append(rule)
-                logger.debug(f"ルール {len(valid_rules)}: {rule.get('説明')}")
 
             if not valid_rules:
                 logger.error("有効なルールが見つかりませんでした")
                 return None
 
-            logger.info(f"有効なルール {len(valid_rules)} 個を読み込みました（デフォルトルール含む）")
+            logger.info(f"適用ルール数: {len(valid_rules)}")
             return valid_rules
 
         except Exception as e:
