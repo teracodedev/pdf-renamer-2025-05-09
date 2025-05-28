@@ -1328,6 +1328,9 @@ class PDFRenamerApp:
     def _set_person(self, person):
         """選択された担当者を設定しUIを更新します。"""
         self.selected_person.set(person)
+        # 担当者を.envファイルに保存
+        self.config_manager.set('DEFAULT_PERSON', person)
+        self.config_manager.save_config()
         logger.info(f"担当者を設定: {person}")
         self._add_to_status(f"担当者を「{person}」に設定しました\n")
     
