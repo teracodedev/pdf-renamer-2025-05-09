@@ -1282,6 +1282,8 @@ class PDFRenamerApp:
         if folder:
             self.folder_var.set(folder)
             self.config_manager.set('PDF_FOLDER_PATH', folder)
+            # 設定を.envファイルに保存
+            self.config_manager.save_config()
             # 選択したフォルダを表示するためにステータステキストを更新
             self._add_to_status(f"PDFフォルダを設定しました: {folder}\n")
     
