@@ -1082,6 +1082,11 @@ class PDFRenamerApp:
         
         # 起動時に設定を検証
         self._validate_config_on_startup()
+        
+        # 起動時にPDFファイルの一覧を読み込む
+        pdf_folder = self.config_manager.get('PDF_FOLDER_PATH')
+        if pdf_folder and os.path.exists(pdf_folder):
+            self._load_pdf_files(pdf_folder)
     
     def _setup_ui(self):
         """ユーザーインターフェースをセットアップします。"""
@@ -1304,7 +1309,36 @@ class PDFRenamerApp:
             self.config_manager.save_config()
             # 選択したフォルダを表示するためにステータステキストを更新
             self._add_to_status(f"PDFフォルダを設定しました: {folder}\n")
-    
+            # PDFファイルの一覧を読み込む
+            self._load_pdf_files(folder)
+
+    def _load_pdf_files(self, folder_path):
+        """指定されたフォルダ内のPDFファイルを読み込み、ステータスに表示します。"""
+        try:
+            if not os.path.exists(folder_path):
+                self._add_to_status(f"フォルダが存在しません: {folder_path}\n")
+                return
+
+            # PDFファイルの一覧を取得
+            pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
+            
+            # ステータステキストをクリア
+            self.status_text.delete(1.0, tk.END)
+            
+            if pdf_files:
+                self._add_to_status(f"PDFフォルダ: {folder_path}\n")
+                self._add_to_status(f"PDFファイル一覧 ({len(pdf_files)}個):\n")
+                self._add_to_status("-" * 50 + "\n")
+                for pdf_file in sorted(pdf_files):
+                    self._add_to_status(f"• {pdf_file}\n")
+                self._add_to_status("-" * 50 + "\n")
+            else:
+                self._add_to_status(f"フォルダ内にPDFファイルがありません: {folder_path}\n")
+                
+        except Exception as e:
+            logger.exception(f"PDFファイル一覧の読み込みエラー: {folder_path}")
+            self._add_to_status(f"PDFファイル一覧の読み込みに失敗しました: {str(e)}\n")
+
     def _open_file(self, file_path):
         """ファイルやフォルダをデフォルトのアプリケーションで開きます。"""
         if not file_path:
