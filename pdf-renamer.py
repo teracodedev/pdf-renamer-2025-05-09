@@ -640,6 +640,8 @@ class PDFProcessor:
                     {truncated_ocr}
                     """
                     
+                    prompt += "\n\n注意: 日付は必ず「YYYY年MM月DD日」形式で出力してください。"
+                    
                     response = openai.chat.completions.create(
                         model=self.config_manager.get('OPENAI_MODEL', 'gpt-4.1'),
                         messages=[
@@ -857,20 +859,7 @@ class PDFProcessor:
                 logger.error("生成されたファイル名が空です")
                 return None
             
-            # 連続する半角スペースを1つに置換
-            file_name = re.sub(r'\s+', ' ', file_name)
-            
-            # 各要素間に半角スペースを強制的に入れる
-            # 日付の後
-            file_name = re.sub(r'(\d{4}年\d{2}月\d{2}日)(?!\s)', r'\1 ', file_name)
-            # 「より」の後
-            file_name = re.sub(r'(より)(?!\s)', r'\1 ', file_name)
-            # 金額の前
-            file_name = re.sub(r'(?<!\s)(金額)', r' \1', file_name)
-            # 円の後
-            file_name = re.sub(r'(円)(?!\s)', r'\1 ', file_name)
-            
-            # 最後の連続する半角スペースを1つに置換
+            # 連続する半角スペースを1つに置換（AIが余計なスペースを返した場合のため）
             file_name = re.sub(r'\s+', ' ', file_name)
             
             return file_name
