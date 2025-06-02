@@ -1189,6 +1189,15 @@ class PDFRenamerApp:
         button_frame = ttk.Frame(main_frame)
         button_frame.pack(fill=tk.X)
         
+        # リフレッシュボタンを左側に配置
+        refresh_button = ttk.Button(
+            button_frame,
+            text="フォルダのリフレッシュ",
+            command=self._refresh_folder
+        )
+        refresh_button.pack(side=tk.LEFT, padx=(0, 10))
+        
+        # リネームボタンを右側に配置
         self.rename_button = ttk.Button(
             button_frame,
             text="リネーム開始",
@@ -1651,6 +1660,31 @@ class PDFRenamerApp:
         mode = "有効" if self.business_card_mode.get() else "無効"
         logger.info(f"名刺読み取りモードを{mode}に設定")
         self._add_to_status(f"名刺読み取りモードを{mode}に設定しました\n")
+
+    def _refresh_folder(self):
+        """フォルダのリフレッシュを処理します。"""
+        try:
+            current_folder = self.folder_var.get()
+            if not current_folder:
+                messagebox.showwarning("警告", "PDFフォルダが設定されていません。")
+                return
+                
+            if not os.path.exists(current_folder):
+                messagebox.showerror("エラー", f"フォルダが存在しません: {current_folder}")
+                return
+                
+            # ステータステキストをクリア
+            self.status_text.delete(1.0, tk.END)
+            
+            # PDFファイルの一覧を読み込む
+            self._load_pdf_files(current_folder)
+            
+            # 成功メッセージを表示
+            self._add_to_status("フォルダのリフレッシュが完了しました。\n")
+            
+        except Exception as e:
+            logger.exception("フォルダのリフレッシュ中にエラーが発生しました")
+            messagebox.showerror("エラー", f"フォルダのリフレッシュに失敗しました:\n{str(e)}")
 
 
 def main():
