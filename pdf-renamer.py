@@ -71,7 +71,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path, encoding="utf-8"),  # mode='w'は不要（新規作成）
+        logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),  # mode='w'を追加して新規作成
         logging.StreamHandler()
     ]
 )
