@@ -237,65 +237,67 @@ class PDFProcessor:
     """OCRとAIを使用してPDFファイルを処理し、意味のあるファイル名を生成するクラス。"""
     
     def __init__(self, config_manager, selected_person, status_queue, business_card_mode=False):
-        """PDFProcessorを初期化します。"""
+        """PDFProcessorの初期化"""
         self.config_manager = config_manager
         self.selected_person = selected_person
         self.status_queue = status_queue
         self.business_card_mode = business_card_mode
-        self.yaml_rules = None
         self.processed_files = set()  # 処理済みファイルを追跡
-        self.load_yaml_rules()
+        self.rules = self.load_yaml_rules()  # ルールを初期化
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
-        logger.debug(f"名刺読み取りモード: {self.business_card_mode}")
+        logger.debug(f"名刺読み取りモード: {business_card_mode}")
         logger.debug(f"設定マネージャー: {config_manager}")
         
     def load_yaml_rules(self):
-        """YAMLファイルからルールを読み込みます。"""
+        """YAMLファイルからリネームルールを読み込む"""
         try:
             yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rename_rules.yaml')
             logger.debug(f"YAMLファイルのパス: {yaml_path}")
-            logger.debug(f"YAMLファイルを読み込み中: {yaml_path}")
-
+            
             if not os.path.exists(yaml_path):
-                logger.error(f"YAMLファイルが見つかりません: {yaml_path}")
-                return None
+                error_msg = f"YAMLファイルが見つかりません: {yaml_path}"
+                logger.error(error_msg)
+                self.status_queue.put(("error", error_msg))
+                return []
 
             with open(yaml_path, 'r', encoding='utf-8') as f:
                 yaml_content = yaml.safe_load(f)
+                if not yaml_content or 'ファイル命名のルール' not in yaml_content:
+                    error_msg = "YAMLファイルの形式が不正です"
+                    logger.error(error_msg)
+                    self.status_queue.put(("error", error_msg))
+                    return []
 
-            if not yaml_content or 'ファイル命名のルール' not in yaml_content:
-                logger.error("YAMLファイルの形式が不正です")
-                return None
+                rules = yaml_content['ファイル命名のルール']
+                if not isinstance(rules, list):
+                    error_msg = "ルールがリスト形式ではありません"
+                    logger.error(error_msg)
+                    self.status_queue.put(("error", error_msg))
+                    return []
 
-            rules = yaml_content['ファイル命名のルール']
-            if not isinstance(rules, list):
-                logger.error("ルールがリスト形式ではありません")
-                return None
+                # ルールの検証
+                valid_rules = []
+                for rule in rules:
+                    if not isinstance(rule, dict):
+                        logger.warning(f"不正なルール形式をスキップ: {rule}")
+                        continue
+                    
+                    required_fields = ['説明', '正規表現', '書類の種類', '命名ルール', 'プロンプト']
+                    if not all(field in rule for field in required_fields):
+                        logger.warning(f"必須フィールドが不足しているルールをスキップ: {rule.get('説明', '不明')}")
+                        continue
+                    
+                    valid_rules.append(rule)
 
-            valid_rules = []
-            for rule in rules:
-                if not isinstance(rule, dict):
-                    logger.warning(f"無効なルール形式をスキップします: {rule}")
-                    continue
-
-                required_fields = ['説明', '正規表現', '書類の種類', '命名ルール', 'プロンプト']
-                if not all(field in rule for field in required_fields):
-                    logger.warning(f"必須フィールドが不足しているルールをスキップします: {rule.get('説明', 'Unnamed rule')}")
-                    continue
-
-                valid_rules.append(rule)
-
-            if not valid_rules:
-                logger.error("有効なルールが見つかりませんでした")
-                return None
-
-            logger.info(f"適用ルール数: {len(valid_rules)}")
-            return valid_rules
+                logger.info(f"適用ルール数: {len(valid_rules)}")
+                return valid_rules
 
         except Exception as e:
-            logger.error(f"YAMLファイルの読み込み中にエラーが発生しました: {str(e)}")
-            return None
+            error_msg = f"YAMLファイルの読み込みエラー: {str(e)}"
+            logger.error(error_msg)
+            self.status_queue.put(("error", error_msg))
+            return []
     
     def process_pdf(self, pdf_file_path):
         """単一のPDFファイルを処理します：画像に変換、OCR、リネーム。"""
@@ -688,47 +690,54 @@ class PDFProcessor:
 
     def _propose_file_name(self, ocr_result):
         """OCR結果からファイル名を提案する"""
-        try:
-            # 現在の日付を取得
-            today = datetime.now().strftime("%Y年%m月%d日")
-            format_params = {
-                "今日の日付": today,
-                "担当者": self.selected_person
-            }
-
-            # 和暦を西暦に変換
-            western_date = self._convert_wareki_to_western(ocr_result)
-
-            # ルールを優先順位でソート
-            sorted_rules = sorted(self.rules, key=lambda x: x.get('優先順位', 100))
-
-            # 各ルールを試行
-            for rule in sorted_rules:
-                pattern = rule.get('正規表現', '')
-                if pattern and re.search(pattern, ocr_result, re.IGNORECASE):
-                    # ルールが適用されたことをログに出力
-                    rule_info = f"適用ルール: {rule.get('説明', '不明')} (優先順位: {rule.get('優先順位', 100)})"
-                    self.status_queue.put(("info", rule_info))
-                    
-                    # ルールを処理
-                    result = self._process_rule(rule, western_date, format_params, ocr_result)
-                    if result:
-                        return result
-
-            # デフォルトのルールを適用
-            default_rule = next((rule for rule in self.rules if rule.get('説明') == 'その他の書類のリネームルール'), None)
-            if default_rule:
-                # デフォルトルールが適用されたことをログに出力
-                rule_info = f"適用ルール: {default_rule.get('説明', '不明')} (優先順位: {default_rule.get('優先順位', 100)})"
-                self.status_queue.put(("info", rule_info))
+        logger.debug("ファイル名の提案を開始")
+        logger.debug(f"OCR結果: {ocr_result}")
+        
+        # フォーマットパラメータの準備
+        today = datetime.now()
+        format_params = {
+            '今日の日付': today.strftime('%Y年%m月%d日'),
+            '今月1日': today.replace(day=1).strftime('%Y年%m月01日'),
+            '担当者': self.selected_person,
+            'ocr_result': ocr_result
+        }
+        
+        # 西暦に変換
+        western_date = self._convert_wareki_to_western(ocr_result)
+        logger.debug(f"西暦変換結果: {western_date}")
+        
+        # ルールの適用
+        logger.debug(f"ルール数: {len(self.rules)}")
+        for rule in self.rules:
+            rule_type = rule.get('書類の種類', '')
+            pattern = rule.get('正規表現', '')
+            logger.debug(f"ルール '{rule.get('説明', '')}' のパターン '{pattern}' をチェック")
+            
+            # 名刺のリネームルールは名刺読み取りモードの時のみ適用
+            if rule_type == '名刺' and not self.business_card_mode:
+                logger.debug("名刺のリネームルールは名刺読み取りモードの時のみ適用されます")
+                continue
                 
-                return self._process_rule(default_rule, western_date, format_params, ocr_result)
-
-            return None
-
-        except Exception as e:
-            self.status_queue.put(("error", f"ファイル名生成エラー: {str(e)}"))
-            return None
+            if re.search(pattern, western_date):
+                logger.info(f"適用ルール: {rule.get('説明', '')} (優先順位: {rule.get('優先順位', 0)})")
+                logger.debug(f"ルール処理開始: {rule.get('説明', '')}")
+                
+                try:
+                    # ルールのパラメータを追加
+                    format_params.update({
+                        '命名ルール': rule.get('命名ルール', ''),
+                        '書類の種類': rule.get('書類の種類', '')
+                    })
+                    
+                    new_name = self._process_rule(rule, western_date, format_params, ocr_result)
+                    if new_name:
+                        return new_name
+                except Exception as e:
+                    logger.error(f"ルール処理エラー: {str(e)}")
+                    continue
+        
+        logger.warning("適用できるルールが見つかりませんでした")
+        return None
     
     def _normalize_ocr_result(self, ocr_result):
         """OCR結果を正規化します。"""
@@ -765,237 +774,49 @@ class PDFProcessor:
         return ""  # 一致がない場合は空文字
     
     def _extract_date(self, text):
-        """テキストから日付を抽出してYYYY年MM月DD日形式に変換します。"""
-        # 様々な日付形式を試す
-        
-        # 令和〇年〇月〇日 形式（優先度を上げる）
-        date_match = re.search(r'令和\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日', text)
-        if date_match:
-            year = 2018 + int(date_match.group(1))
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            logger.debug(f"令和の日付を検出: {year}年{month}月{day}日")
-            return f"{year}年{month}月{day}日"
-            
-        # 令〇年〇月〇日 形式（OCR誤認識対応）
-        date_match = re.search(r'令\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日', text)
-        if date_match:
-            year = 2018 + int(date_match.group(1))
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            logger.debug(f"令の日付を検出: {year}年{month}月{day}日")
-            return f"{year}年{month}月{day}日"
-            
-        # 平成〇年〇月〇日 形式
-        date_match = re.search(r'平成\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日', text)
-        if date_match:
-            year = 1988 + int(date_match.group(1))
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            logger.debug(f"平成の日付を検出: {year}年{month}月{day}日")
-            return f"{year}年{month}月{day}日"
-            
-        # 昭和〇年〇月〇日 形式
-        date_match = re.search(r'昭和\s*(\d+)\s*年\s*(\d+)\s*月\s*(\d+)\s*日', text)
-        if date_match:
-            year = 1925 + int(date_match.group(1))
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            logger.debug(f"昭和の日付を検出: {year}年{month}月{day}日")
-            return f"{year}年{month}月{day}日"
-            
-        # YYYY年MM月DD日 形式
-        date_match = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', text)
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            logger.debug(f"西暦の日付を検出: {year}年{month}月{day}日")
-            return f"{year}年{month}月{day}日"
-            
-        # YYYY/MM/DD または YYYY-MM-DD 形式
-        date_match = re.search(r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})', text)
-        if date_match:
-            year = date_match.group(1)
-            month = date_match.group(2).zfill(2)
-            day = date_match.group(3).zfill(2)
-            logger.debug(f"スラッシュ区切りの日付を検出: {year}年{month}月{day}日")
-            return f"{year}年{month}月{day}日"
-            
-        # 日付が見つからない場合は現在の日付を使用
-        current_date = datetime.now().strftime('%Y年%m月%d日')
-        logger.debug(f"日付が見つからないため現在の日付を使用: {current_date}")
-        return current_date
-    
-    def _process_rule(self, rule, western_date, format_params, ocr_result):
-        """ルールに基づいてファイル名を生成します。"""
+        """テキストから日付を抽出する"""
         try:
-            # プロンプトの置換
-            prompt = rule.get('プロンプト', '')
-            if not prompt:
-                logger.error("プロンプトが見つかりません")
-                return None
-            
-            prompt = prompt.replace('{書類の種類}', rule.get('書類の種類', '不明'))
-            prompt = prompt.replace('{命名ルール}', rule.get('命名ルール', ''))
-            prompt = prompt.replace('{ocr_result}', ocr_result)
-            prompt = prompt.replace('{担当者}', self.selected_person)
-            
-            # 日付フォーマットの指示を追加
-            prompt += "\n\n注意: 日付は必ず「YYYY年MM月DD日」形式で出力してください。"
-            prompt += "\n注意: ファイル名の各要素（日付、取引先、内容、金額など）の間には必ず半角スペースを入れてください。"
-            
-            # OpenAI APIの呼び出し
-            response = self._call_openai_api(prompt)
-            if not response:
-                logger.error("OpenAI APIからの応答がありません")
-                return None
-            
-            # 応答からファイル名を抽出
-            # 最後の行を取得（通常、ファイル名は最後の行にあります）
-            lines = response.strip().split('\n')
-            file_name = lines[-1].strip()
-            
-            # ファイル名が空でないことを確認
-            if not file_name:
-                logger.error("生成されたファイル名が空です")
-                return None
-            
-            # 連続する半角スペースを1つに置換（AIが余計なスペースを返した場合のため）
-            file_name = re.sub(r'\s+', ' ', file_name)
-            
-            return file_name
-        
-        except Exception as e:
-            logger.error(f"ルール処理中にエラーが発生しました: {str(e)}")
-            return None
+            logger.debug(f"日付抽出開始: {text}")
 
-    def _extract_value(self, text, key):
-        """OCRテキストから特定の値を抽出します。"""
-        patterns = {
-            "内容": [
-                r"内容[：:]\s*([^\n]+)",
-                r"件名[：:]\s*([^\n]+)",
-                r"タイトル[：:]\s*([^\n]+)"
-            ],
-            "金額": [
-                r"金額[：:]\s*(\d+(?:,\d+)*)",
-                r"合計[：:]\s*(\d+(?:,\d+)*)",
-                r"￥\s*(\d+(?:,\d+)*)"
-            ],
-            "取引先": [
-                r"取引先[：:]\s*([^\n]+)",
-                r"発行元[：:]\s*([^\n]+)",
-                r"発行者[：:]\s*([^\n]+)"
-            ],
-            "申請者": [
-                r"申請者[：:]\s*([^\n]+)",
-                r"申請人[：:]\s*([^\n]+)",
-                r"氏名[：:]\s*([^\n]+)"
-            ],
-            "年度": [
-                r"年度[：:]\s*([^\n]+)",
-                r"(\d{4})年度",
-                r"令和(\d+)年度"
+            # 西暦の日付パターン
+            patterns = [
+                r'(\d{4})年(\d{1,2})月(\d{1,2})日',  # 2024年5月1日
+                r'(\d{4})/(\d{1,2})/(\d{1,2})',     # 2024/5/1
+                r'(\d{4})-(\d{1,2})-(\d{1,2})',     # 2024-5-1
             ]
-        }
-        
-        if key in patterns:
-            for pattern in patterns[key]:
+
+            # 和暦の日付パターン
+            wareki_patterns = [
+                (r'令和(\d+)年(\d{1,2})月(\d{1,2})日', 2018),  # 令和6年5月1日
+                (r'平成(\d+)年(\d{1,2})月(\d{1,2})日', 1988),  # 平成31年5月1日
+                (r'昭和(\d+)年(\d{1,2})月(\d{1,2})日', 1925),  # 昭和64年5月1日
+            ]
+
+            # 西暦パターンの検索
+            for pattern in patterns:
                 match = re.search(pattern, text)
                 if match:
-                    value = match.group(1).strip()
-                    if key == "金額":
-                        value = value.replace(",", "")
-                    elif key == "年度" and "令和" in pattern:
-                        value = f"令和{value}年度"
-                    return value
-        
-        return None
-    
-    def _rename_pdf(self, pdf_file_path, new_pdf_name):
-        """PDFファイルを新しい名前でリネームします。"""
-        try:
-            logger.debug(f"リネーム中: {pdf_file_path} -> {new_pdf_name}")
-            
-            if not os.path.exists(pdf_file_path):
-                logger.error(f"ファイルが存在しません: {pdf_file_path}")
-                return False
-            
-            # ファイル名のサニタイズ（無効な文字を削除）
-            new_pdf_name = re.sub(r'[\\/:*?"<>|&]', '_', new_pdf_name)
-            
-            # .pdf拡張子を確保
-            if not new_pdf_name.lower().endswith('.pdf'):
-                new_pdf_name += '.pdf'
-            
-            # ターゲットパスの取得
-            directory = os.path.dirname(pdf_file_path)
-            new_file_path = os.path.join(directory, new_pdf_name)
-            
-            # 名前が同じ場合はスキップ
-            if os.path.normpath(pdf_file_path) == os.path.normpath(new_file_path):
-                logger.info(f"ファイルはすでに正しい名前です: {pdf_file_path}")
-                return new_file_path
-            
-            # 名前の衝突を処理するためにカウンターを追加
-            if os.path.exists(new_file_path):
-                base_name, ext = os.path.splitext(new_pdf_name)
-                counter = 1
-                while os.path.exists(os.path.join(directory, f"{base_name}_{counter}{ext}")):
-                    counter += 1
-                new_file_path = os.path.join(directory, f"{base_name}_{counter}{ext}")
-            
-            # リネームを実行
-            os.rename(pdf_file_path, new_file_path)
-            logger.info(f"ファイルは正常にリネームされました: {new_file_path}")
-            
-            # ファイルシステムの更新を許可するための小さな遅延
-            time.sleep(0.5)
-            
-            return new_file_path
-            
+                    year, month, day = map(int, match.groups())
+                    date_str = f"{year}年{month:02d}月{day:02d}日"
+                    logger.debug(f"西暦日付を抽出: {date_str}")
+                    return date_str
+
+            # 和暦パターンの検索
+            for pattern, base_year in wareki_patterns:
+                match = re.search(pattern, text)
+                if match:
+                    wareki_year, month, day = map(int, match.groups())
+                    year = base_year + wareki_year
+                    date_str = f"{year}年{month:02d}月{day:02d}日"
+                    logger.debug(f"和暦から日付を抽出: {date_str}")
+                    return date_str
+
+            logger.debug("日付が見つかりませんでした")
+            return None
+
         except Exception as e:
-            logger.exception(f"ファイルのリネームエラー: {pdf_file_path}")
-            return False
-    
-    def _extract_submit_date(self, text):
-        """テキストから提出日を抽出してYYYY年MM月DD日形式に変換します。"""
-        # 提出日のパターン
-        patterns = [
-            r'提出日\s*西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日',
-            r'提出日\s*令和(\d+)年(\d+)月(\d+)日',
-            r'提出日\s*平成(\d+)年(\d+)月(\d+)日',
-            r'提出日\s*昭和(\d+)年(\d+)月(\d+)日',
-            r'提出日\s*(\d{4})年(\d{1,2})月(\d{1,2})日',
-            r'西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日\s*提出',
-            r'令和(\d+)年(\d+)月(\d+)日\s*提出',
-            r'平成(\d+)年(\d+)月(\d+)日\s*提出',
-            r'昭和(\d+)年(\d+)月(\d+)日\s*提出',
-            r'(\d{4})年(\d{1,2})月(\d{1,2})日\s*提出',
-            r'西暦\s*(\d{4})年(\d{1,2})月(\d{1,2})日'  # 西暦で始まるパターンを追加
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                if "西暦" in pattern:
-                    year = match.group(1)
-                elif "令和" in pattern:
-                    year = str(2018 + int(match.group(1)))
-                elif "平成" in pattern:
-                    year = str(1988 + int(match.group(1)))
-                elif "昭和" in pattern:
-                    year = str(1925 + int(match.group(1)))
-                else:
-                    year = match.group(1)
-                    
-                month = match.group(2).zfill(2)
-                day = match.group(3).zfill(2)
-                
-                return f"{year}年{month}月{day}日"
-                
-        return None
+            logger.error(f"日付抽出エラー: {str(e)}")
+            return None
 
     def _call_openai_api(self, prompt):
         """OpenAI APIを呼び出してファイル名を生成します。"""
@@ -1053,6 +874,138 @@ class PDFProcessor:
             logger.error(f"OpenAI API呼び出し中にエラーが発生しました: {str(e)}")
             logger.exception("詳細なエラー情報:")
             return None
+
+    def _process_rule(self, rule, western_date, format_params, ocr_result):
+        """ルールに基づいてファイル名を生成する"""
+        logger.debug(f"ルール処理開始: {rule.get('説明', '')}")
+        
+        # プロンプトの取得とフォーマット
+        prompt = rule.get('プロンプト', '')
+        if not prompt:
+            logger.error("プロンプトが見つかりません")
+            return None
+            
+        # フォーマットパラメータの準備
+        format_params.update({
+            'ocr_result': ocr_result,
+            '命名ルール': rule.get('命名ルール', ''),
+            '書類の種類': rule.get('書類の種類', '')
+        })
+        
+        # プロンプトのフォーマット
+        try:
+            formatted_prompt = prompt.format(**format_params)
+        except KeyError as e:
+            logger.error(f"プロンプトのフォーマットエラー: {str(e)}")
+            return None
+            
+        # OpenAI APIの呼び出し
+        try:
+            response = self._call_openai_api(formatted_prompt)
+            if not response:
+                logger.error("APIからの応答が空です")
+                return None
+                
+            # 応答からファイル名を抽出
+            file_name = response.strip()
+            if not file_name:
+                logger.error("生成されたファイル名が空です")
+                return None
+                
+            return file_name
+            
+        except Exception as e:
+            logger.error(f"API呼び出しエラー: {str(e)}")
+            return None
+
+    def _extract_value(self, text, key):
+        """OCRテキストから特定の値を抽出します。"""
+        patterns = {
+            "内容": [
+                r"内容[：:]\s*([^\n]+)",
+                r"件名[：:]\s*([^\n]+)",
+                r"タイトル[：:]\s*([^\n]+)"
+            ],
+            "金額": [
+                r"金額[：:]\s*(\d+(?:,\d+)*)",
+                r"合計[：:]\s*(\d+(?:,\d+)*)",
+                r"￥\s*(\d+(?:,\d+)*)"
+            ],
+            "取引先": [
+                r"取引先[：:]\s*([^\n]+)",
+                r"発行元[：:]\s*([^\n]+)",
+                r"発行者[：:]\s*([^\n]+)"
+            ],
+            "申請者": [
+                r"申請者[：:]\s*([^\n]+)",
+                r"申請人[：:]\s*([^\n]+)",
+                r"氏名[：:]\s*([^\n]+)"
+            ],
+            "年度": [
+                r"年度[：:]\s*([^\n]+)",
+                r"(\d{4})年度",
+                r"令和(\d+)年度"
+            ]
+        }
+        
+        if key in patterns:
+            for pattern in patterns[key]:
+                match = re.search(pattern, text)
+                if match:
+                    value = match.group(1).strip()
+                    if key == "金額":
+                        value = value.replace(",", "")
+                    elif key == "年度" and "令和" in pattern:
+                        value = f"令和{value}年度"
+                    return value
+        
+        return None
+
+    def _rename_pdf(self, pdf_file_path, new_pdf_name):
+        """PDFファイルを新しい名前でリネームします。"""
+        try:
+            logger.debug(f"リネーム中: {pdf_file_path} -> {new_pdf_name}")
+            
+            if not os.path.exists(pdf_file_path):
+                logger.error(f"ファイルが存在しません: {pdf_file_path}")
+                return False
+            
+            # ファイル名のサニタイズ（無効な文字を削除）
+            new_pdf_name = re.sub(r'[\\/:*?"<>|&]', '_', new_pdf_name)
+            
+            # .pdf拡張子を確保
+            if not new_pdf_name.lower().endswith('.pdf'):
+                new_pdf_name += '.pdf'
+            
+            # ターゲットパスの取得
+            directory = os.path.dirname(pdf_file_path)
+            new_file_path = os.path.join(directory, new_pdf_name)
+            
+            # 名前が同じ場合はスキップ
+            if os.path.normpath(pdf_file_path) == os.path.normpath(new_file_path):
+                logger.info(f"ファイルはすでに正しい名前です: {pdf_file_path}")
+                return new_file_path
+            
+            # 名前の衝突を処理するためにカウンターを追加
+            if os.path.exists(new_file_path):
+                base_name, ext = os.path.splitext(new_pdf_name)
+                counter = 1
+                while os.path.exists(os.path.join(directory, f"{base_name}_{counter}{ext}")):
+                    counter += 1
+                new_file_path = os.path.join(directory, f"{base_name}_{counter}{ext}")
+            
+            # リネームを実行
+            os.rename(pdf_file_path, new_file_path)
+            logger.info(f"ファイルは正常にリネームされました: {new_file_path}")
+            
+            # ファイルシステムの更新を許可するための小さな遅延
+            time.sleep(0.5)
+            
+            return new_file_path
+            
+        except Exception as e:
+            logger.exception(f"ファイルのリネームエラー: {pdf_file_path}")
+            return False
 
 
 class PDFRenamerApp:
