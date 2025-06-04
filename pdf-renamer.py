@@ -861,10 +861,10 @@ def main():
         root = tk.Tk()
         
         # ウィンドウサイズを設定
-        window_width = 490
+        window_width = 647  # 588から1割増加
         window_height = 420
         root.geometry(f"{window_width}x{window_height}")
-        root.minsize(420, 350)
+        root.minsize(554, 350)  # 最小サイズも1割増加
         
         # 画面の中央に配置
         screen_width = root.winfo_screenwidth()
