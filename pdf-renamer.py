@@ -698,6 +698,7 @@ class PDFProcessor:
         format_params = {
             '今日の日付': today.strftime('%Y年%m月%d日'),
             '今月1日': today.replace(day=1).strftime('%Y年%m月01日'),
+            '日付': today.strftime('%Y年%m月%d日'),  # 日付パラメータを追加
             '担当者': self.selected_person,
             'ocr_result': ocr_result
         }
@@ -736,6 +737,8 @@ class PDFProcessor:
                     logger.error(f"ルール処理エラー: {str(e)}")
                     continue
         
+        # ルールが見つからなかった場合のメッセージを処理状況に表示
+        self.status_queue.put(("warning", "適用できるルールが見つかりませんでした"))
         logger.warning("適用できるルールが見つかりませんでした")
         return None
     
