@@ -241,8 +241,9 @@ class PDFProcessor:
         self.config_manager = config_manager
         self.selected_person = selected_person
         self.status_queue = status_queue
-        self.business_card_mode = business_card_mode  # ← こうする
+        self.business_card_mode = business_card_mode
         self.yaml_rules = None
+        self.processed_files = set()  # 処理済みファイルを追跡
         self.load_yaml_rules()
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
@@ -298,6 +299,11 @@ class PDFProcessor:
     
     def process_pdf(self, pdf_file_path):
         """単一のPDFファイルを処理します：画像に変換、OCR、リネーム。"""
+        # 既に処理済みのファイルはスキップ
+        if pdf_file_path in self.processed_files:
+            logger.debug(f"ファイルは既に処理済みです: {pdf_file_path}")
+            return True
+
         temp_jpeg_path = None
         try:
             logger.debug(f"PDFを処理中: {pdf_file_path}")
@@ -324,6 +330,7 @@ class PDFProcessor:
             new_path = self._rename_pdf(pdf_file_path, new_pdf_name)
             if new_path:
                 self.status_queue.put(f"リネーム完了: {os.path.basename(new_path)}\n")
+                self.processed_files.add(pdf_file_path)  # 処理済みとしてマーク
                 return True
             else:
                 self.status_queue.put(f"処理失敗: {pdf_file_path} (リネームエラー)\n")
@@ -680,52 +687,47 @@ class PDFProcessor:
             return "不明"
 
     def _propose_file_name(self, ocr_result):
-        """OCR結果からファイル名を提案します。"""
+        """OCR結果からファイル名を提案する"""
         try:
-            logger.debug("ファイル名の提案を開始します")
-            logger.debug(f"OCR結果: {ocr_result}")
+            # 現在の日付を取得
+            today = datetime.now().strftime("%Y年%m月%d日")
+            format_params = {
+                "今日の日付": today,
+                "担当者": self.selected_person
+            }
 
-            # OCR結果を正規化
-            normalized_text = self._normalize_ocr_result(ocr_result)
-            logger.debug(f"正規化後のOCR結果: {normalized_text}")
+            # 和暦を西暦に変換
+            western_date = self._convert_wareki_to_western(ocr_result)
 
-            # YAMLルールを読み込む
-            rules = self.load_yaml_rules()
-            if not rules:
-                logger.error("YAMLルールの読み込みに失敗しました")
-                return None
+            # ルールを優先順位でソート
+            sorted_rules = sorted(self.rules, key=lambda x: x.get('優先順位', 100))
 
-            # 名刺読み取りモードの場合
-            if self.business_card_mode:
-                logger.debug("名刺読み取りモードで処理します")
-                for rule in rules:
-                    if rule.get('書類の種類') == '名刺':
-                        logger.debug(f"名刺ルールを適用します: {rule.get('説明')}")
-                        return self._process_rule(rule, None, {}, ocr_result)
-                logger.warning("名刺ルールが見つかりませんでした")
-                return None
+            # 各ルールを試行
+            for rule in sorted_rules:
+                pattern = rule.get('正規表現', '')
+                if pattern and re.search(pattern, ocr_result, re.IGNORECASE):
+                    # ルールが適用されたことをログに出力
+                    rule_info = f"適用ルール: {rule.get('説明', '不明')} (優先順位: {rule.get('優先順位', 100)})"
+                    self.status_queue.put(("info", rule_info))
+                    
+                    # ルールを処理
+                    result = self._process_rule(rule, western_date, format_params, ocr_result)
+                    if result:
+                        return result
 
-            # 通常モードの場合
-            logger.debug("通常モードで処理します")
-            for rule in rules:
-                if rule.get('書類の種類') != '名刺':  # 名刺以外のルールをチェック
-                    pattern = rule.get('正規表現')
-                    if pattern and re.search(pattern, normalized_text):
-                        logger.debug(f"ルールに一致しました: {rule.get('説明')}")
-                        return self._process_rule(rule, None, {}, ocr_result)
+            # デフォルトのルールを適用
+            default_rule = next((rule for rule in self.rules if rule.get('説明') == 'その他の書類のリネームルール'), None)
+            if default_rule:
+                # デフォルトルールが適用されたことをログに出力
+                rule_info = f"適用ルール: {default_rule.get('説明', '不明')} (優先順位: {default_rule.get('優先順位', 100)})"
+                self.status_queue.put(("info", rule_info))
+                
+                return self._process_rule(default_rule, western_date, format_params, ocr_result)
 
-            # どのルールにも一致しない場合、デフォルトルールを探す
-            logger.debug("通常のルールに一致しなかったため、デフォルトルールを探します")
-            for rule in rules:
-                if rule.get('説明') == 'どのルールにも該当しない場合':
-                    logger.debug("デフォルトルールを適用します")
-                    return self._process_rule(rule, None, {}, ocr_result)
-
-            logger.warning("デフォルトルールも見つかりませんでした")
             return None
 
         except Exception as e:
-            logger.error(f"ファイル名の提案中にエラーが発生しました: {str(e)}")
+            self.status_queue.put(("error", f"ファイル名生成エラー: {str(e)}"))
             return None
     
     def _normalize_ocr_result(self, ocr_result):
@@ -1371,8 +1373,19 @@ class PDFRenamerApp:
         self._set_person(self.selected_person.get())
     
     def _add_to_status(self, message):
-        """ステータステキストエリアにメッセージを追加します。"""
-        self.status_text.insert(tk.END, message)
+        """ステータスメッセージを追加"""
+        if isinstance(message, tuple):
+            msg_type, msg_text = message
+            if msg_type == "info":
+                self.status_text.insert(tk.END, f"ℹ️ {msg_text}\n")
+            elif msg_type == "error":
+                self.status_text.insert(tk.END, f"❌ {msg_text}\n")
+            elif msg_type == "success":
+                self.status_text.insert(tk.END, f"✅ {msg_text}\n")
+            else:
+                self.status_text.insert(tk.END, f"{msg_text}\n")
+        else:
+            self.status_text.insert(tk.END, f"{message}\n")
         self.status_text.see(tk.END)
     
     def _poll_status_queue(self):
@@ -1453,7 +1466,7 @@ class PDFRenamerApp:
                 self.config_manager,
                 self.selected_person.get(),
                 self.status_queue,
-                self.business_card_mode.get()  # 名刺読み取りモードの状態を渡す
+                self.business_card_mode.get()
             )
             
             total_files = len(pdf_files)
@@ -1500,7 +1513,7 @@ class PDFRenamerApp:
                             self._update_progress(val, completed, successful, total_files))
                     
                     # バッチ間で少し待機（APIレート制限を考慮）
-                    time.sleep(1)
+                    time.sleep(2)  # 待機時間を2秒に増やす
             
             # 最終ステータス更新
             summary = (
