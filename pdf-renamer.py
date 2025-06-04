@@ -444,19 +444,24 @@ class PDFRenamerApp:
     def _setup_ui(self):
         """UIの初期設定を行います。"""
         # メインフレーム
-        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame = ttk.Frame(self.root, padding="5")
         main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # グリッドの重み設定
+        self.root.columnconfigure(0, weight=1)
+        self.root.rowconfigure(0, weight=1)
+        main_frame.columnconfigure(1, weight=1)
         
         # フォルダ選択
         ttk.Label(main_frame, text="PDFフォルダ:").grid(row=0, column=0, sticky=tk.W)
         self.folder_path = tk.StringVar(value=self.config_manager.get('PDF_FOLDER_PATH'))
-        ttk.Entry(main_frame, textvariable=self.folder_path, width=50).grid(row=0, column=1, padx=5)
+        ttk.Entry(main_frame, textvariable=self.folder_path, width=35).grid(row=0, column=1, padx=5)
         ttk.Button(main_frame, text="参照", command=self._browse_folder).grid(row=0, column=2)
         
         # 担当者選択
         ttk.Label(main_frame, text="担当者:").grid(row=1, column=0, sticky=tk.W)
         self.person_var = tk.StringVar(value=self.selected_person)
-        person_combo = ttk.Combobox(main_frame, textvariable=self.person_var, width=47)
+        person_combo = ttk.Combobox(main_frame, textvariable=self.person_var, width=32)
         person_combo['values'] = self.config_manager.get('PERSONS')
         person_combo.grid(row=1, column=1, padx=5, pady=5)
         person_combo.bind('<<ComboboxSelected>>', self._on_person_changed)
@@ -468,7 +473,7 @@ class PDFRenamerApp:
             text="名刺読み取りモード",
             variable=self.business_card_var,
             command=self._toggle_business_card_mode
-        ).grid(row=2, column=1, sticky=tk.W, pady=5)
+        ).grid(row=2, column=0, columnspan=3, sticky=tk.N, pady=5)
         
         # 開始/停止ボタン
         self.start_button = ttk.Button(
@@ -476,7 +481,7 @@ class PDFRenamerApp:
             text="リネーム開始",
             command=self._start_renaming
         )
-        self.start_button.grid(row=3, column=1, pady=10)
+        self.start_button.grid(row=3, column=0, columnspan=3, pady=10)
         
         # 進捗バー
         self.progress_var = tk.DoubleVar()
@@ -488,8 +493,11 @@ class PDFRenamerApp:
         self.progress_bar.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         
         # ステータス表示
-        self.status_text = scrolledtext.ScrolledText(main_frame, height=10, width=60)
-        self.status_text.grid(row=5, column=0, columnspan=3, pady=5)
+        self.status_text = scrolledtext.ScrolledText(main_frame, height=12, width=50)
+        self.status_text.grid(row=5, column=0, columnspan=3, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        
+        # ステータス表示エリアの拡張設定
+        main_frame.rowconfigure(5, weight=1)
         
         # メニューの作成
         self._create_menu()
@@ -853,8 +861,17 @@ def main():
         root = tk.Tk()
         
         # ウィンドウサイズを設定
-        root.geometry("700x600")
-        root.minsize(600, 500)
+        window_width = 490
+        window_height = 420
+        root.geometry(f"{window_width}x{window_height}")
+        root.minsize(420, 350)
+        
+        # 画面の中央に配置
+        screen_width = root.winfo_screenwidth()
+        screen_height = root.winfo_screenheight()
+        x = (screen_width - window_width) // 2
+        y = (screen_height - window_height) // 2
+        root.geometry(f"+{x}+{y}")
         
         # アプリケーションを初期化
         app = PDFRenamerApp(root)
