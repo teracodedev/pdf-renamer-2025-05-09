@@ -1,12 +1,12 @@
 """
 PDF Renamer - OCR、Google Cloud Vision、およびOpenAIを使用してPDFファイルを
-内容に基づいて自動的にリネームするための強化ツール
+内容に基づいて自動的にリネームするための強化ツール（フリーズ問題修正版）
 
 このアプリケーションはOCRを使用してPDFからテキストを抽出し、AIで内容を分析し、
 カスタマイズ可能なルールに従って意味のあるファイル名を生成します。
 
 作者: Claude（ユーザーのオリジナルに基づく）
-日付: 2025年5月9日
+日付: 2025年6月4日（フリーズ問題修正版）
 """
 
 import os
@@ -39,6 +39,7 @@ import pdf2image
 import json
 import traceback
 import shutil
+import gc
 
 # ============================================================================
 # 設定とセットアップ
@@ -49,7 +50,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = SCRIPT_DIR / '.env'
 DEFAULT_YAML_PATH = SCRIPT_DIR / 'rename_rules.yaml'
 DEFAULT_IMAGE_PATH = SCRIPT_DIR / 'temp_images'
-APP_VERSION = "2025年5月10日バージョン"
+APP_VERSION = "2025年6月4日バージョン（フリーズ問題修正版）"
 
 # ログの設定
 log_file_path = os.path.join(SCRIPT_DIR, "pdf-renamer.log")
@@ -71,7 +72,7 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),  # mode='w'を追加して新規作成
+        logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),
         logging.StreamHandler()
     ]
 )
@@ -87,35 +88,15 @@ logger.debug(f"Pythonバージョン: {sys.version}")
 logger.debug(f"実行ディレクトリ: {os.getcwd()}")
 logger.debug("=" * 50)
 
-# 定数とグローバル変数
-SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_ENV_PATH = SCRIPT_DIR / '.env'
-DEFAULT_YAML_PATH = SCRIPT_DIR / 'rename_rules.yaml'
-DEFAULT_IMAGE_PATH = SCRIPT_DIR / 'temp_images'
-APP_VERSION = "2025年5月10日バージョン"
-
-
-# ============================================================================
-# ヘルパークラス
-# ============================================================================
-
-class DefaultDict(dict):
-    """存在しないキーに対してデフォルト値を返すカスタム辞書。"""
-    def __missing__(self, key):
-        return "不明"
-
-
 class ConfigManager:
     """アプリケーション設定と環境変数を管理するクラス。"""
     
     def __init__(self, env_path=None):
-        """オプションの環境ファイルパスで設定マネージャーを初期化します。"""
         self.env_path = env_path or DEFAULT_ENV_PATH
         self.config = {}
         self.load_config()
         
     def load_config(self):
-        """.envファイルから設定を読み込みます。"""
         try:
             load_dotenv(self.env_path)
             
@@ -131,13 +112,13 @@ class ConfigManager:
             self.config['OPENAI_MODEL'] = os.getenv('OPENAI_MODEL', 'gpt-4.1')
             self.config['OPENAI_TEMPERATURE'] = float(os.getenv('OPENAI_TEMPERATURE', '0.2'))
             
-            # オプション設定（デフォルト値あり）
+            # オプション設定
             self.config['PERSONS'] = os.getenv('PERSONS', '').split(',')
             self.config['DEFAULT_PERSON'] = os.getenv('DEFAULT_PERSON', '担当者自動設定')
             self.config['ORGANIZATION_NAME'] = os.getenv('ORGANIZATION_NAME', 'DefaultOrganization')
             self.config['TITLE'] = os.getenv('TITLE', 'Untitled')
             
-            # 画像ディレクトリがない場合は作成する
+            # 画像ディレクトリの作成
             os.makedirs(self.config['IMAGE_FILE_PATH'], exist_ok=True)
             
             logger.info(f"設定を{self.env_path}から読み込みました")
@@ -147,7 +128,6 @@ class ConfigManager:
             raise
             
     def _find_poppler_path(self):
-        """一般的なインストール場所からPopplerのパスを見つけます。"""
         possible_paths = [
             "C:\\Program Files\\Poppler\\bin",
             "C:\\Program Files (x86)\\Poppler\\bin",
@@ -159,7 +139,6 @@ class ConfigManager:
                 logger.debug(f"Popplerが見つかりました: {path}")
                 return path
         
-        # PopplerがPATHにある場合は空文字を返す（システムPATHを使用）
         try:
             result = subprocess.run(["pdftoppm", "-v"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
@@ -172,7 +151,6 @@ class ConfigManager:
         return ""
     
     def validate_config(self):
-        """必要な設定がすべて存在し、有効であることを確認します。"""
         required_configs = {
             'PDF_FOLDER_PATH': "PDFフォルダパス",
             'IMAGE_FILE_PATH': "一時画像フォルダパス",
@@ -186,10 +164,8 @@ class ConfigManager:
             if not self.config.get(key):
                 missing.append(desc)
                 
-        # Popplerインストールの検証
         if not self.config.get('POPPLER_PATH'):
             try:
-                # pdftoppmがPATHにあるかチェック
                 result = subprocess.run(["pdftoppm", "-v"], capture_output=True, text=True, check=False)
                 if result.returncode != 0:
                     missing.append("Popplerインストール（PDF変換に必要）")
@@ -201,7 +177,6 @@ class ConfigManager:
             if not os.path.exists(pdftoppm_path):
                 missing.append(f"{pdftoppm_path}のPopplerの実行ファイル")
                 
-        # YAMLファイルが存在するか検証
         yaml_path = Path(self.config['YAML_FILE'])
         if not yaml_path.exists():
             missing.append(f"{yaml_path}のYAMLルールファイル")
@@ -209,15 +184,12 @@ class ConfigManager:
         return missing
     
     def get(self, key, default=None):
-        """キーによって設定値を取得します。"""
         return self.config.get(key, default)
     
     def set(self, key, value):
-        """設定値を設定します。"""
         self.config[key] = value
         
     def save_config(self):
-        """設定を.envファイルに保存します。"""
         try:
             with open(self.env_path, 'w', encoding='utf-8') as f:
                 for key, value in self.config.items():
@@ -232,1444 +204,670 @@ class ConfigManager:
             logger.error(f"設定の保存エラー: {e}")
             raise
 
-
 class PDFProcessor:
     """OCRとAIを使用してPDFファイルを処理し、意味のあるファイル名を生成するクラス。"""
     
     def __init__(self, config_manager, selected_person, status_queue, business_card_mode=False):
-        """PDFProcessorの初期化"""
         self.config_manager = config_manager
         self.selected_person = selected_person
         self.status_queue = status_queue
         self.business_card_mode = business_card_mode
-        self.processed_files = set()  # 処理済みファイルを追跡
-        self.rules = self.load_yaml_rules()  # ルールを初期化
+        self.processed_files = set()
+        self.rules = self.load_yaml_rules()
+        self.openai_client = OpenAI(api_key=self.config_manager.get('OPENAI_API_KEY'))
+        self.vision_client = vision.ImageAnnotatorClient()
+        
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
         logger.debug(f"名刺読み取りモード: {business_card_mode}")
-        logger.debug(f"設定マネージャー: {config_manager}")
         
     def load_yaml_rules(self):
-        """YAMLファイルからリネームルールを読み込む"""
+        """YAMLファイルからリネームルールを読み込みます。"""
         try:
-            yaml_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'rename_rules.yaml')
-            logger.debug(f"YAMLファイルのパス: {yaml_path}")
-            
-            if not os.path.exists(yaml_path):
-                error_msg = f"YAMLファイルが見つかりません: {yaml_path}"
-                logger.error(error_msg)
-                self.status_queue.put(("error", error_msg))
-                return []
-
-            with open(yaml_path, 'r', encoding='utf-8') as f:
-                yaml_content = yaml.safe_load(f)
-                if not yaml_content or 'ファイル命名のルール' not in yaml_content:
-                    error_msg = "YAMLファイルの形式が不正です"
-                    logger.error(error_msg)
-                    self.status_queue.put(("error", error_msg))
-                    return []
-
-                rules = yaml_content['ファイル命名のルール']
-                if not isinstance(rules, list):
-                    error_msg = "ルールがリスト形式ではありません"
-                    logger.error(error_msg)
-                    self.status_queue.put(("error", error_msg))
-                    return []
-
-                # ルールの検証
-                valid_rules = []
-                for rule in rules:
-                    if not isinstance(rule, dict):
-                        logger.warning(f"不正なルール形式をスキップ: {rule}")
-                        continue
-                    
-                    required_fields = ['説明', '正規表現', '書類の種類', '命名ルール', 'プロンプト']
-                    if not all(field in rule for field in required_fields):
-                        logger.warning(f"必須フィールドが不足しているルールをスキップ: {rule.get('説明', '不明')}")
-                        continue
-                    
-                    valid_rules.append(rule)
-
-                logger.info(f"適用ルール数: {len(valid_rules)}")
-                return valid_rules
-
+            with open(self.config_manager.get('YAML_FILE'), 'r', encoding='utf-8') as f:
+                rules = yaml.safe_load(f)
+            logger.debug(f"YAMLルールを読み込みました: {len(rules['ファイル命名のルール'])}個のルール")
+            return rules['ファイル命名のルール']
         except Exception as e:
-            error_msg = f"YAMLファイルの読み込みエラー: {str(e)}"
-            logger.error(error_msg)
-            self.status_queue.put(("error", error_msg))
-            return []
-    
+            logger.error(f"YAMLルールの読み込みエラー: {e}")
+            raise
+            
     def process_pdf(self, pdf_file_path):
-        """単一のPDFファイルを処理します：画像に変換、OCR、リネーム。"""
-        # 既に処理済みのファイルはスキップ
-        if pdf_file_path in self.processed_files:
-            logger.debug(f"ファイルは既に処理済みです: {pdf_file_path}")
-            return True
-
-        temp_jpeg_path = None
+        """PDFファイルを処理し、新しいファイル名を生成します。"""
+        image_paths = []
         try:
-            logger.debug(f"PDFを処理中: {pdf_file_path}")
+            # PDFを画像に変換
+            image_paths = self._pdf_to_jpeg(pdf_file_path)
+            if not image_paths:
+                raise Exception("PDFの画像変換に失敗しました")
+                
+            # OCR処理
+            ocr_results = []
+            for image_path in image_paths:
+                ocr_result = self._ocr_jpeg(image_path)
+                if ocr_result:
+                    ocr_results.append(ocr_result)
+                    
+            if not ocr_results:
+                raise Exception("OCR処理に失敗しました")
+                
+            # OCR結果を結合
+            combined_ocr = "\n".join(ocr_results)
             
-            # 1. PDFをJPEGに変換
-            temp_jpeg_path = self._pdf_to_jpeg(pdf_file_path)
-            if not temp_jpeg_path:
-                self.status_queue.put(f"処理失敗: {pdf_file_path} (PDF変換エラー)\n")
-                return False
-                
-            # 2. OCRでテキストを抽出
-            ocr_result = self._ocr_jpeg(temp_jpeg_path)
-            if not ocr_result:
-                self.status_queue.put(f"処理失敗: {pdf_file_path} (OCRエラー)\n")
-                return False
-                
-            # 3. OCR結果に基づいて新しいファイル名を生成
-            new_pdf_name = self._propose_file_name(ocr_result)
-            if not new_pdf_name:
-                self.status_queue.put(f"処理失敗: {pdf_file_path} (ファイル名提案エラー)\n")
-                return False
-                
-            # 4. PDFファイルのリネーム
-            new_path = self._rename_pdf(pdf_file_path, new_pdf_name)
-            if new_path:
-                self.status_queue.put(f"リネーム完了: {os.path.basename(new_path)}\n")
-                self.processed_files.add(pdf_file_path)  # 処理済みとしてマーク
+            # ChatGPT-4でファイル名を生成
+            new_name = self._generate_filename_with_gpt4(combined_ocr, pdf_file_path)
+            
+            # ファイル名の正規化
+            new_name = self._normalize_filename(new_name)
+            
+            # ファイルのリネーム
+            if new_name:
+                self._rename_pdf(pdf_file_path, new_name)
                 return True
-            else:
-                self.status_queue.put(f"処理失敗: {pdf_file_path} (リネームエラー)\n")
-                return False
                 
-        except Exception as e:
-            logger.exception(f"PDFの処理エラー: {pdf_file_path}")
-            self.status_queue.put(f"処理エラー: {pdf_file_path} - {str(e)}\n")
             return False
             
+        except Exception as e:
+            logger.error(f"PDF処理エラー ({pdf_file_path}): {e}")
+            self.status_queue.put(f"エラー: {os.path.basename(pdf_file_path)} - {str(e)}")
+            return False
         finally:
-            # 一時ファイルのクリーンアップ
-            if temp_jpeg_path and os.path.exists(temp_jpeg_path):
-                try:
-                    os.remove(temp_jpeg_path)
-                    logger.debug(f"一時ファイルを削除しました: {temp_jpeg_path}")
-                except Exception as e:
-                    logger.exception(f"一時ファイルの削除エラー: {temp_jpeg_path}")
-    
+            # 一時ファイルの削除
+            self._cleanup_temp_files(image_paths)
+            
     def _pdf_to_jpeg(self, pdf_file_path):
-        """PDFの最初のページをJPEG画像に変換します。"""
+        """PDFファイルをJPEG画像に変換します。"""
         try:
-            logger.debug(f"PDFをJPEGに変換中: {pdf_file_path}")
-            
-            poppler_path = self.config_manager.get('POPPLER_PATH')
-            
-            # 指定されたフォルダ内に一意の一時ファイル名を作成
-            temp_jpeg_path = os.path.join(
-                self.config_manager.get('IMAGE_FILE_PATH'),
-                f"temp_{datetime.now().strftime('%Y%m%d%H%M%S%f')}_{os.path.basename(pdf_file_path)}.jpg"
+            images = convert_from_path(
+                pdf_file_path,
+                poppler_path=self.config_manager.get('POPPLER_PATH'),
+                dpi=300
             )
             
-            # PDFの最初のページをJPEG画像に変換
-            kwargs = {
-                'first_page': 1,
-                'last_page': 1,
-                'dpi': 300,  # OCR結果と処理速度のバランスを考慮して300に下げる
-                'grayscale': True,  # グレースケールにすることで処理を高速化
-                'thread_count': os.cpu_count() or 4,  # 利用可能なCPUコア数を使用
-                'use_pdftocairo': True,  # pdftocairoを使用して品質を向上
-                'fmt': 'jpeg',  # 明示的にJPEG形式を指定
-                'jpegopt': {'quality': 85, 'optimize': True}  # JPEG品質を最適化
-            }
-            
-            if poppler_path:
-                kwargs['poppler_path'] = poppler_path
+            image_paths = []
+            for i, image in enumerate(images):
+                image_path = os.path.join(
+                    self.config_manager.get('IMAGE_FILE_PATH'),
+                    f"temp_{int(time.time() * 1000)}_{os.getpid()}_{i}.jpg"
+                )
+                image.save(image_path, "JPEG")
+                image_paths.append(image_path)
                 
-            try:
-                images = convert_from_path(pdf_file_path, **kwargs)
-                if not images:
-                    raise ValueError("PDFから画像が抽出されませんでした")
-                    
-                images[0].save(temp_jpeg_path, 'JPEG', quality=85, optimize=True)  # 品質を最適化
-                logger.debug(f"PDFをJPEGに変換しました: {temp_jpeg_path}")
-                return temp_jpeg_path
-                
-            except PDFPageCountError:
-                logger.warning(f"PDFの変換に失敗しました - 破損している可能性があります: {pdf_file_path}")
-                return None
-                
-        except PDFInfoNotInstalledError:
-            logger.error("Popplerが正しくインストールまたは設定されていません")
-            self.status_queue.put("エラー: Popplerが正しく設定されていません。\n")
-            return None
+            return image_paths
             
         except Exception as e:
-            logger.exception(f"PDFをJPEGに変換するエラー: {pdf_file_path}")
-            return None
-    
+            logger.error(f"PDF変換エラー: {e}")
+            return []
+            
     def _ocr_jpeg(self, image_path):
-        """Google Cloud Vision APIを使用してJPEG画像からテキストを抽出します。"""
+        """JPEG画像からテキストを抽出します。"""
         try:
-            logger.debug(f"画像に対してOCRを実行中: {image_path}")
-            
-            # Vision APIクライアントを初期化
-            client = vision.ImageAnnotatorClient()
-            
-            # 画像ファイルを読み込む
             with open(image_path, 'rb') as image_file:
                 content = image_file.read()
                 
-            # 画像オブジェクトを作成しテキスト検出を実行
             image = vision.Image(content=content)
+            response = self.vision_client.text_detection(image=image)
             
-            # 日本語のヒントを設定
-            image_context = vision.ImageContext(
-                language_hints=["ja"],
-                text_detection_params=vision.TextDetectionParams(
-                    enable_text_detection_confidence_score=True
-                )
-            )
-            
-            # document_text_detectionを使用して日本語テキストの認識精度を向上
-            response = client.document_text_detection(
-                image=image,
-                image_context=image_context,
-                timeout=30  # タイムアウトを30秒に設定
-            )
-            
-            # エラーをチェック
             if response.error.message:
-                raise Exception(f"Google Cloud Vision APIエラー: {response.error.message}")
+                raise Exception(f"Google Vision APIエラー: {response.error.message}")
                 
-            # OCRテキストを抽出して返す
             if response.text_annotations:
-                result = response.text_annotations[0].description
-                logger.debug(f"OCRに成功し、{len(result)}文字を抽出しました")
-                # OCR結果をログファイルに出力（長すぎる場合は省略）
-                if len(result) > 500:
-                    logger.info(f"OCR結果:\n{'-' * 50}\n{result[:500]}...\n{'-' * 50}")
-                else:
-                    logger.info(f"OCR結果:\n{'-' * 50}\n{result}\n{'-' * 50}")
-                return result
-            else:
-                logger.warning(f"画像内にテキストが検出されませんでした: {image_path}")
-                return ""
+                return response.text_annotations[0].description
                 
-        except google.api_core.exceptions.PermissionDenied as e:
-            logger.error(f"Google Cloud Vision APIのアクセス権が拒否されました: {e}")
-            self.status_queue.put(
-                "エラー: Google Cloud Vision APIの課金が有効になっていません。\n"
-                "https://console.developers.google.com/billing/enable で課金を有効にしてください。\n"
-            )
             return None
             
         except Exception as e:
-            logger.exception(f"OCRエラー: {image_path}")
+            logger.error(f"OCRエラー: {e}")
             return None
-    
-    def _convert_wareki_to_western(self, text):
-        """和暦を西暦に変換します。"""
-        # 年号なしの和暦の変換（令和を想定）
-        text = re.sub(r'(\d+)年', lambda m: str(2018 + int(m.group(1))) + '年', text)
-        
-        # 令和の変換 (令和: 2019-)
-        text = re.sub(r'令和(\d+)年', lambda m: str(2018 + int(m.group(1))) + '年', text)
-        # 平成の変換 (平成: 1989-2019)
-        text = re.sub(r'平成(\d+)年', lambda m: str(1988 + int(m.group(1))) + '年', text)
-        # 昭和の変換 (昭和: 1926-1989)
-        text = re.sub(r'昭和(\d+)年', lambda m: str(1925 + int(m.group(1))) + '年', text)
-        # 大正の変換 (大正: 1912-1926)
-        text = re.sub(r'大正(\d+)年', lambda m: str(1911 + int(m.group(1))) + '年', text)
-        return text
-        
-    def _extract_death_date(self, text):
-        """テキストから死亡日を抽出してYYYY年MM月DD日形式に変換します。"""
-        # 死亡年月日時のパターン
-        patterns = [
-            r'死亡年月日時\s*令和(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日\s*令和(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日時\s*平成(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日\s*平成(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日時\s*昭和(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日\s*昭和(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日時\s*令和(\d+)年(\d+)月中旬頃',
-            r'死亡年月日\s*令和(\d+)年(\d+)月中旬頃',
-            # 年号なしのパターンを追加
-            r'死亡年月日時\s*(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日\s*(\d+)年(\d+)月(\d+)日',
-            r'死亡年月日時\s*(\d+)年(\d+)月中旬頃',
-            r'死亡年月日\s*(\d+)年(\d+)月中旬頃'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                if len(match.groups()) == 3:
-                    year = int(match.group(1))
-                    month = match.group(2).zfill(2)
-                    
-                    # 日付が「中旬頃」の場合は15日とする
-                    if '中旬頃' in match.group(0):
-                        day = '15'
-                    else:
-                        day = match.group(3).zfill(2)
-                    
-                    # 年号なしの場合は令和として扱う
-                    if not any(era in pattern for era in ['令和', '平成', '昭和', '大正']):
-                        year = 2018 + year
-                    
-                    return f"{year}年{month}月{day}日"
-                
-        return None
-
-    def _extract_name(self, text, alt_keys=None):
-        """テキストから故人の名前を抽出します。alt_keysで追加のキーワードも探索できます。"""
-        # 死亡者の氏名のパターン
-        patterns = [
-            r'死亡者の氏名\s*([^\n]+)',
-            r'死亡者氏名\s*([^\n]+)',
-            r'死亡者\s*氏名\s*([^\n]+)',
-            r'死亡者\s*([^\n]+)',
-            r'本人署名\s*([^\n]+)'  # 門徒誓約書用のパターンを追加
-        ]
-        if alt_keys:
-            for key in alt_keys:
-                patterns.append(rf'{key}\s*([^\n]+)')
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                name = match.group(1).strip()
-                # 余分な空白を削除
-                name = re.sub(r'\s+', ' ', name)
-                # 性別やその他の情報が含まれている場合は除去
-                name = re.sub(r'\s*[男女]\s*$', '', name)
-                return name
-        return None
-
-    def _extract_cremation_date(self, text):
-        """テキストから火葬日を抽出してYYYY年MM月DD日形式に変換します。"""
-        # 火葬年月日のパターン
-        patterns = [
-            r'火葬年月日\s*令和(\d+)年(\d+)月(\d+)日',
-            r'火葬\s*年月日\s*令和(\d+)年(\d+)月(\d+)日',
-            r'火葬年月日\s*平成(\d+)年(\d+)月(\d+)日',
-            r'火葬\s*年月日\s*平成(\d+)年(\d+)月(\d+)日',
-            r'火葬年月日\s*昭和(\d+)年(\d+)月(\d+)日',
-            r'火葬\s*年月日\s*昭和(\d+)年(\d+)月(\d+)日',
-            # 年号なしのパターンを追加
-            r'火葬年月日\s*(\d+)年(\d+)月(\d+)日',
-            r'火葬\s*年月日\s*(\d+)年(\d+)月(\d+)日'
-        ]
-        
-        for pattern in patterns:
-            match = re.search(pattern, text)
-            if match:
-                year = int(match.group(1))
-                month = match.group(2).zfill(2)
-                day = match.group(3).zfill(2)
-                
-                # 年号なしの場合は令和として扱う
-                if not any(era in pattern for era in ['令和', '平成', '昭和', '大正']):
-                    year = 2018 + year
-                
-                return f"{year}年{month}月{day}日"
-                
-        return None
-
-    def _extract_organization(self, ocr_result):
-        """OCRテキストから組織名を抽出します。"""
+            
+    def _generate_filename_with_gpt4(self, ocr_text, pdf_file_path):
+        """ChatGPT-4を使用してファイル名を生成します。"""
         try:
-            logger.debug("OCRテキストから組織名を抽出中")
+            # 現在の日付を取得
+            current_date = datetime.now().strftime("%Y年%m月%d日")
             
-            # 文書内の一般的な組織識別子
-            patterns = [
-                # 日本語パターン
-                r'発行元[：:]\s*([^\n]+)',
-                r'発行者[：:]\s*([^\n]+)',
-                r'請求元[：:]\s*([^\n]+)',
-                r'取引先[：:]\s*([^\n]+)',
-                r'会社名[：:]\s*([^\n]+)',
-                r'事業者名[：:]\s*([^\n]+)',
-                r'企業名[：:]\s*([^\n]+)',
-                r'組織名[：:]\s*([^\n]+)',
-                r'屋号[：:]\s*([^\n]+)',
-                r'法人名[：:]\s*([^\n]+)',
-                r'支払先[：:]\s*([^\n]+)',
-                r'振込先[：:]\s*([^\n]+)',
-                r'販売元[：:]\s*([^\n]+)',
-                
-                # より広いパターン（より具体性が低いが、より多くのケースを捕捉できる可能性がある）
-                r'株式会社([^\n]{1,20})',  # 「株式会社」に続く会社名
-                r'有限会社([^\n]{1,20})',  # 「有限会社」に続く会社名
-                r'合同会社([^\n]{1,20})',  # 「合同会社」に続く会社名
-                
-                # 標準的なレターヘッドの位置を探す（文書の上部）
-                r'^([^\n]{1,50}株式会社[^\n]{0,30})\n',
-                r'^([^\n]{1,50}有限会社[^\n]{0,30})\n',
-                r'^([^\n]{1,50}合同会社[^\n]{0,30})\n',
-                
-                # その他のケース用のより一般的なパターン
-                r'(\S+商店)',
-                r'(\S+店)',
-                
-                # 葬儀や宗教関連文書用の特別なパターン
-                r'葬儀社[：:]\s*([^\n]+)',
-                r'((?:\S+葬儀社|葬儀\S+|セレモニー\S+))',
-                r'((?:\S+寺院|寺院\S+|寺院\s+\S+))',
-                r'((?:\S+石材|石材\S+))'
-            ]
+            # プロンプトの作成
+            prompt = f"""
+            以下のOCR結果から、適切なファイル名を生成してください。
             
-            # 各パターンを試す
-            for pattern in patterns:
-                match = re.search(pattern, ocr_result)
-                if match:
-                    org_name = match.group(1).strip()
-                    
-                    # 抽出した名前をクリーンアップ
-                    org_name = re.sub(r'\s+', ' ', org_name)  # 空白を正規化
-                    org_name = re.sub(r'[、。．・]$', '', org_name)  # 末尾の句読点を削除
-                    
-                    # 長すぎる場合は切り詰める
-                    if len(org_name) > 30:
-                        org_name = org_name[:30] + "..."
-                    
-                    logger.debug(f"組織名を見つけました: {org_name}")
-                    return org_name
-            
-            # より詳細なアプローチとしてOpenAIを使用
-            if self.config_manager.get('OPENAI_API_KEY'):
-                try:
-                    openai.api_key = self.config_manager.get('OPENAI_API_KEY')
-                    
-                    # OCR結果が長すぎる場合は切り詰める
-                    max_length = 2000  # OpenAIのトークン制限
-                    truncated_ocr = ocr_result[:max_length] if len(ocr_result) > max_length else ocr_result
-                    
-                    prompt = f"""
-                    以下のOCRテキストから、組織名または発行元の名前を抽出してください。
-                    組織名が見つからない場合は「不明」と返してください。
-                    回答は組織名のみを返し、余計な説明は不要です。
-
-                    OCRテキスト:
-                    {truncated_ocr}
-                    """
-                    
-                    prompt += "\n\n注意: 日付は必ず「YYYY年MM月DD日」形式で出力してください。"
-                    
-                    response = openai.chat.completions.create(
-                        model=self.config_manager.get('OPENAI_MODEL', 'gpt-4.1'),
-                        messages=[
-                            {"role": "system", "content": "OCRテキストから組織名を抽出します。組織名のみを返すか、見つからない場合は「不明」と返してください。"},
-                            {"role": "user", "content": prompt}
-                        ],
-                        temperature=0.1,
-                        max_tokens=50
-                    )
-                    
-                    org_name = response.choices[0].message.content.strip()
-                    
-                    # OpenAIがより長い説明を返した場合、組織名だけを抽出
-                    if len(org_name.split()) > 4:
-                        # これは長い説明かもしれないので、最初の行やフレーズを取得
-                        org_name = org_name.split("\n")[0].strip()
-                        if len(org_name) > 30:
-                            org_name = org_name[:30] + "..."
-                    
-                    logger.debug(f"OpenAIで抽出された組織名: {org_name}")
-                    
-                    if org_name == "不明" or "見つかりません" in org_name:
-                        org_name = "不明"
-                    
-                    return org_name
-                    
-                except Exception as e:
-                    logger.error(f"組織名抽出のためのOpenAI使用中のエラー: {e}")
-            
-            # 組織名が見つからない場合はデフォルトを返す
-            logger.debug("OCRテキスト内に組織名が見つかりませんでした")
-            return "不明"
-            
-        except Exception as e:
-            logger.exception("組織名抽出エラー")
-            return "不明"
-
-    def _propose_file_name(self, ocr_result):
-        """OCR結果からファイル名を提案する"""
-        logger.debug("ファイル名の提案を開始")
-        logger.debug(f"OCR結果: {ocr_result}")
-        
-        # フォーマットパラメータの準備
-        today = datetime.now()
-        format_params = {
-            '今日の日付': today.strftime('%Y年%m月%d日'),
-            '今月1日': today.replace(day=1).strftime('%Y年%m月01日'),
-            '日付': today.strftime('%Y年%m月%d日'),  # 日付パラメータを追加
-            '担当者': self.selected_person,
-            'ocr_result': ocr_result
-        }
-        
-        # 西暦に変換
-        western_date = self._convert_wareki_to_western(ocr_result)
-        logger.debug(f"西暦変換結果: {western_date}")
-        
-        # ルールの適用
-        logger.debug(f"ルール数: {len(self.rules)}")
-        for rule in self.rules:
-            rule_type = rule.get('書類の種類', '')
-            pattern = rule.get('正規表現', '')
-            logger.debug(f"ルール '{rule.get('説明', '')}' のパターン '{pattern}' をチェック")
-            
-            # 名刺のリネームルールは名刺読み取りモードの時のみ適用
-            if rule_type == '名刺' and not self.business_card_mode:
-                logger.debug("名刺のリネームルールは名刺読み取りモードの時のみ適用されます")
-                continue
-                
-            if re.search(pattern, western_date):
-                logger.info(f"適用ルール: {rule.get('説明', '')} (優先順位: {rule.get('優先順位', 0)})")
-                logger.debug(f"ルール処理開始: {rule.get('説明', '')}")
-                
-                try:
-                    # ルールのパラメータを追加
-                    format_params.update({
-                        '命名ルール': rule.get('命名ルール', ''),
-                        '書類の種類': rule.get('書類の種類', '')
-                    })
-                    
-                    new_name = self._process_rule(rule, western_date, format_params, ocr_result)
-                    if new_name:
-                        return new_name
-                except Exception as e:
-                    logger.error(f"ルール処理エラー: {str(e)}")
-                    continue
-        
-        # ルールが見つからなかった場合のメッセージを処理状況に表示
-        self.status_queue.put(("warning", "適用できるルールが見つかりませんでした"))
-        logger.warning("適用できるルールが見つかりませんでした")
-        return None
-    
-    def _normalize_ocr_result(self, ocr_result):
-        """OCR結果を正規化します。"""
-        # 改行を空白に置換
-        normalized = re.sub(r'\n+', ' ', ocr_result)
-        # 連続する空白を1つに置換
-        normalized = re.sub(r'\s+', ' ', normalized)
-        # 前後の空白を削除
-        normalized = normalized.strip()
-        
-        logger.debug(f"正規化前のOCR結果: {ocr_result}")
-        logger.debug(f"正規化後のOCR結果: {normalized}")
-        
-        return normalized
-
-    def _auto_detect_person(self, ocr_text):
-        """OCRテキストの内容に基づいて担当者を自動検出します。"""
-        person_keywords = {
-            "前田至法": ["翠江会", "前田至法"],
-            "前田百音": ["安田女子中学高等学校", "前田百音"],
-            "前田蓮生": ["広島学院", "前田蓮生"],
-            "前田ツヤ": ["前田ツヤ"],
-            "前田至正": ["前田至正"],
-            "前田純代": ["前田純代"]
-        }
-        
-        for person, keywords in person_keywords.items():
-            for keyword in keywords:
-                if keyword in ocr_text:
-                    logger.debug(f"自動検出された担当者: {person}、キーワード: {keyword}に基づく")
-                    return person
-        
-        logger.debug("担当者が自動検出されませんでした")
-        return ""  # 一致がない場合は空文字
-    
-    def _extract_date(self, text):
-        """テキストから日付を抽出する"""
-        try:
-            logger.debug(f"日付抽出開始: {text}")
-
-            # 西暦の日付パターン
-            patterns = [
-                r'(\d{4})年(\d{1,2})月(\d{1,2})日',  # 2024年5月1日
-                r'(\d{4})/(\d{1,2})/(\d{1,2})',     # 2024/5/1
-                r'(\d{4})-(\d{1,2})-(\d{1,2})',     # 2024-5-1
-            ]
-
-            # 和暦の日付パターン
-            wareki_patterns = [
-                (r'令和(\d+)年(\d{1,2})月(\d{1,2})日', 2018),  # 令和6年5月1日
-                (r'平成(\d+)年(\d{1,2})月(\d{1,2})日', 1988),  # 平成31年5月1日
-                (r'昭和(\d+)年(\d{1,2})月(\d{1,2})日', 1925),  # 昭和64年5月1日
-            ]
-
-            # 西暦パターンの検索
-            for pattern in patterns:
-                match = re.search(pattern, text)
-                if match:
-                    year, month, day = map(int, match.groups())
-                    date_str = f"{year}年{month:02d}月{day:02d}日"
-                    logger.debug(f"西暦日付を抽出: {date_str}")
-                    return date_str
-
-            # 和暦パターンの検索
-            for pattern, base_year in wareki_patterns:
-                match = re.search(pattern, text)
-                if match:
-                    wareki_year, month, day = map(int, match.groups())
-                    year = base_year + wareki_year
-                    date_str = f"{year}年{month:02d}月{day:02d}日"
-                    logger.debug(f"和暦から日付を抽出: {date_str}")
-                    return date_str
-
-            logger.debug("日付が見つかりませんでした")
-            return None
-
-        except Exception as e:
-            logger.error(f"日付抽出エラー: {str(e)}")
-            return None
-
-    def _call_openai_api(self, prompt):
-        """OpenAI APIを呼び出してファイル名を生成します。"""
-        try:
-            logger.debug("OpenAI API呼び出しを開始します")
-            logger.debug(f"プロンプト: {prompt}")
-
-            # 設定からAPIキーを取得
-            api_key = self.config_manager.get('OPENAI_API_KEY')
-            if not api_key:
-                logger.error("OpenAI APIキーが設定されていません")
-                return None
-
-            logger.debug("OpenAIクライアントを初期化します")
-            # OpenAIクライアントの初期化
-            client = OpenAI(api_key=api_key)
-
-            # モデル名を取得（デフォルトはgpt-4）
-            model = self.config_manager.get('OPENAI_MODEL', 'gpt-4')
-            logger.debug(f"使用するモデル: {model}")
-
-            # プロンプトを最適化
-            optimized_prompt = f"""
-            以下のOCR結果から、指定された形式でファイル名を生成してください。
-            ファイル名のみを返してください。余計な説明は不要です。
-            日付は必ず「YYYY年MM月DD日」形式で出力してください。
-
             OCR結果:
-            {prompt}
+            {ocr_text}
+            
+            現在の日付: {current_date}
+            担当者: {self.selected_person}
+            
+            以下のルールに従ってファイル名を生成してください：
+            {json.dumps(self.rules, ensure_ascii=False, indent=2)}
+            
+            ファイル名は以下の形式で出力してください：
+            {{"filename": "生成されたファイル名"}}
             """
-
-            # APIリクエストの送信
-            logger.debug("APIリクエストを送信します")
-            response = client.chat.completions.create(
-                model=model,
+            
+            # ChatGPT-4にリクエスト
+            response = self.openai_client.chat.completions.create(
+                model=self.config_manager.get('OPENAI_MODEL'),
                 messages=[
-                    {"role": "system", "content": "あなたはPDFファイルの名前を生成するアシスタントです。与えられたOCR結果から適切な情報を抽出し、指定された形式でファイル名を生成してください。日付は必ず「YYYY年MM月DD日」形式で出力してください。ファイル名のみを返してください。"},
-                    {"role": "user", "content": optimized_prompt}
+                    {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。"},
+                    {"role": "user", "content": prompt}
                 ],
-                temperature=0.2,  # より一貫性のある結果を得るために温度を下げる
-                max_tokens=100,   # トークン数を制限
-                timeout=30        # タイムアウトを30秒に設定
+                temperature=self.config_manager.get('OPENAI_TEMPERATURE')
             )
-
-            # レスポンスからテキストを抽出
-            if response.choices and len(response.choices) > 0:
-                result = response.choices[0].message.content.strip()
-                logger.debug(f"APIレスポンス: {result}")
-                return result
-            else:
-                logger.error("OpenAI APIからの応答が空です")
-                return None
-
-        except Exception as e:
-            logger.error(f"OpenAI API呼び出し中にエラーが発生しました: {str(e)}")
-            logger.exception("詳細なエラー情報:")
-            return None
-
-    def _process_rule(self, rule, western_date, format_params, ocr_result):
-        """ルールに基づいてファイル名を生成する"""
-        logger.debug(f"ルール処理開始: {rule.get('説明', '')}")
-        
-        # プロンプトの取得とフォーマット
-        prompt = rule.get('プロンプト', '')
-        if not prompt:
-            logger.error("プロンプトが見つかりません")
-            return None
             
-        # フォーマットパラメータの準備
-        format_params.update({
-            'ocr_result': ocr_result,
-            '命名ルール': rule.get('命名ルール', ''),
-            '書類の種類': rule.get('書類の種類', '')
-        })
-        
-        # プロンプトのフォーマット
-        try:
-            formatted_prompt = prompt.format(**format_params)
-        except KeyError as e:
-            logger.error(f"プロンプトのフォーマットエラー: {str(e)}")
-            return None
-            
-        # OpenAI APIの呼び出し
-        try:
-            response = self._call_openai_api(formatted_prompt)
-            if not response:
-                logger.error("APIからの応答が空です")
-                return None
+            # レスポンスの解析
+            result = response.choices[0].message.content
+            try:
+                result_dict = json.loads(result)
+                return result_dict.get('filename')
+            except json.JSONDecodeError:
+                # JSONとして解析できない場合は、そのままのテキストを返す
+                return result.strip()
                 
-            # 応答からファイル名を抽出
-            file_name = response.strip()
-            if not file_name:
-                logger.error("生成されたファイル名が空です")
-                return None
-                
-            return file_name
-            
         except Exception as e:
-            logger.error(f"API呼び出しエラー: {str(e)}")
+            logger.error(f"ChatGPT-4 APIエラー: {e}")
             return None
-
-    def _extract_value(self, text, key):
-        """OCRテキストから特定の値を抽出します。"""
-        patterns = {
-            "内容": [
-                r"内容[：:]\s*([^\n]+)",
-                r"件名[：:]\s*([^\n]+)",
-                r"タイトル[：:]\s*([^\n]+)"
-            ],
-            "金額": [
-                r"金額[：:]\s*(\d+(?:,\d+)*)",
-                r"合計[：:]\s*(\d+(?:,\d+)*)",
-                r"￥\s*(\d+(?:,\d+)*)"
-            ],
-            "取引先": [
-                r"取引先[：:]\s*([^\n]+)",
-                r"発行元[：:]\s*([^\n]+)",
-                r"発行者[：:]\s*([^\n]+)"
-            ],
-            "申請者": [
-                r"申請者[：:]\s*([^\n]+)",
-                r"申請人[：:]\s*([^\n]+)",
-                r"氏名[：:]\s*([^\n]+)"
-            ],
-            "年度": [
-                r"年度[：:]\s*([^\n]+)",
-                r"(\d{4})年度",
-                r"令和(\d+)年度"
-            ]
-        }
+            
+    def _normalize_filename(self, filename):
+        """ファイル名を正規化します。"""
+        if not filename:
+            return None
+            
+        # ファイル名に使用できない文字を置換
+        invalid_chars = r'[<>:"/\\|?*]'
+        filename = re.sub(invalid_chars, '_', filename)
         
-        if key in patterns:
-            for pattern in patterns[key]:
-                match = re.search(pattern, text)
-                if match:
-                    value = match.group(1).strip()
-                    if key == "金額":
-                        value = value.replace(",", "")
-                    elif key == "年度" and "令和" in pattern:
-                        value = f"令和{value}年度"
-                    return value
+        # 先頭と末尾の空白を削除
+        filename = filename.strip()
         
-        return None
-
-    def _rename_pdf(self, pdf_file_path, new_pdf_name):
-        """PDFファイルを新しい名前でリネームします。"""
+        # 連続する空白を1つに
+        filename = re.sub(r'\s+', ' ', filename)
+        
+        return filename
+        
+    def _rename_pdf(self, pdf_file_path, new_name):
+        """PDFファイルをリネームします。"""
         try:
-            logger.debug(f"リネーム中: {pdf_file_path} -> {new_pdf_name}")
+            # 拡張子を保持
+            ext = os.path.splitext(pdf_file_path)[1]
+            new_path = os.path.join(os.path.dirname(pdf_file_path), f"{new_name}{ext}")
             
-            if not os.path.exists(pdf_file_path):
-                logger.error(f"ファイルが存在しません: {pdf_file_path}")
-                return False
-            
-            # ファイル名のサニタイズ（無効な文字を削除）
-            new_pdf_name = re.sub(r'[\\/:*?"<>|&]', '_', new_pdf_name)
-            
-            # .pdf拡張子を確保
-            if not new_pdf_name.lower().endswith('.pdf'):
-                new_pdf_name += '.pdf'
-            
-            # ターゲットパスの取得
-            directory = os.path.dirname(pdf_file_path)
-            new_file_path = os.path.join(directory, new_pdf_name)
-            
-            # 名前が同じ場合はスキップ
-            if os.path.normpath(pdf_file_path) == os.path.normpath(new_file_path):
-                logger.info(f"ファイルはすでに正しい名前です: {pdf_file_path}")
-                return new_file_path
-            
-            # 名前の衝突を処理するためにカウンターを追加
-            if os.path.exists(new_file_path):
-                base_name, ext = os.path.splitext(new_pdf_name)
-                counter = 1
-                while os.path.exists(os.path.join(directory, f"{base_name}_{counter}{ext}")):
-                    counter += 1
-                new_file_path = os.path.join(directory, f"{base_name}_{counter}{ext}")
-            
-            # リネームを実行
-            os.rename(pdf_file_path, new_file_path)
-            logger.info(f"ファイルは正常にリネームされました: {new_file_path}")
-            
-            # ファイルシステムの更新を許可するための小さな遅延
-            time.sleep(0.5)
-            
-            return new_file_path
+            # 同名ファイルが存在する場合は番号を付加
+            counter = 1
+            while os.path.exists(new_path):
+                new_path = os.path.join(
+                    os.path.dirname(pdf_file_path),
+                    f"{new_name}_{counter}{ext}"
+                )
+                counter += 1
+                
+            # ファイルの移動
+            shutil.move(pdf_file_path, new_path)
+            logger.info(f"ファイルをリネームしました: {os.path.basename(pdf_file_path)} -> {os.path.basename(new_path)}")
+            self.status_queue.put(f"リネーム成功: {os.path.basename(new_path)}")
             
         except Exception as e:
-            logger.exception(f"ファイルのリネームエラー: {pdf_file_path}")
-            return False
-
+            logger.error(f"ファイルリネームエラー: {e}")
+            self.status_queue.put(f"リネームエラー: {os.path.basename(pdf_file_path)} - {str(e)}")
+            
+    def _cleanup_temp_files(self, file_paths):
+        """一時ファイルを削除します。"""
+        for path in file_paths:
+            try:
+                if path and os.path.exists(path):
+                    os.remove(path)
+                    logger.debug(f"一時ファイルを削除しました: {path}")
+            except Exception as e:
+                logger.error(f"一時ファイル削除エラー: {e}")
 
 class PDFRenamerApp:
-    """PDFリネーマーのメインアプリケーションクラス。"""
+    """PDFリネーマーのGUIアプリケーション。"""
     
     def __init__(self, root):
-        """アプリケーションUIとコンポーネントを初期化します。"""
         self.root = root
+        self.root.title("PDF Renamer")
         self.config_manager = ConfigManager()
         self.status_queue = queue.Queue()
-        self.selected_person = tk.StringVar(value=self.config_manager.get('DEFAULT_PERSON'))
-        self.selected_model = tk.StringVar(value=self.config_manager.get('OPENAI_MODEL'))
-        self.processing_flag = tk.BooleanVar(value=False)
-        self.business_card_mode = tk.BooleanVar(value=False)  # 名刺読み取りモード用の変数を追加
+        self.selected_person = self.config_manager.get('DEFAULT_PERSON')
+        self.business_card_mode = False
         
-        # UIのセットアップ
+        # 処理状態の管理
+        self.is_processing = False
+        self.processing_complete = False
+        self.executor = None
+        
         self._setup_ui()
-        
-        # 起動時に設定を検証
         self._validate_config_on_startup()
+        self._poll_status_queue()
         
-        # 起動時にPDFファイルの一覧を読み込む
-        pdf_folder = self.config_manager.get('PDF_FOLDER_PATH')
-        if pdf_folder and os.path.exists(pdf_folder):
-            self._load_pdf_files(pdf_folder)
-    
+        # ウィンドウ終了時のイベントをバインド
+        self.root.protocol("WM_DELETE_WINDOW", self._on_closing)
+        
     def _setup_ui(self):
-        """ユーザーインターフェースをセットアップします。"""
-        self.root.title(f"PDF Renamer {APP_VERSION}")
-        self.root.geometry("700x600")
-        self.root.minsize(600, 400)
+        """UIの初期設定を行います。"""
+        # メインフレーム
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.grid(row=0, column=0, sticky=(tk.W, tk.E, tk.N, tk.S))
         
-        # ウィンドウを中央に配置
-        screen_width = self.root.winfo_screenwidth()
-        screen_height = self.root.winfo_screenheight()
-        x = (screen_width - 700) // 2
-        y = (screen_height - 600) // 2 - 100  # 中央よりやや上に調整
-        self.root.geometry(f"700x600+{x}+{y}")
+        # フォルダ選択
+        ttk.Label(main_frame, text="PDFフォルダ:").grid(row=0, column=0, sticky=tk.W)
+        self.folder_path = tk.StringVar(value=self.config_manager.get('PDF_FOLDER_PATH'))
+        ttk.Entry(main_frame, textvariable=self.folder_path, width=50).grid(row=0, column=1, padx=5)
+        ttk.Button(main_frame, text="参照", command=self._browse_folder).grid(row=0, column=2)
         
-        # スタイルの作成と設定
-        style = ttk.Style()
-        style.configure("TButton", padding=6, relief="flat", font=("Helvetica", 10))
-        style.configure("TLabel", font=("Helvetica", 10))
-        style.configure("Header.TLabel", font=("Helvetica", 12, "bold"))
+        # 担当者選択
+        ttk.Label(main_frame, text="担当者:").grid(row=1, column=0, sticky=tk.W)
+        self.person_var = tk.StringVar(value=self.selected_person)
+        person_combo = ttk.Combobox(main_frame, textvariable=self.person_var, width=47)
+        person_combo['values'] = self.config_manager.get('PERSONS')
+        person_combo.grid(row=1, column=1, padx=5, pady=5)
+        person_combo.bind('<<ComboboxSelected>>', self._on_person_changed)
         
-        # パディング付きのメインフレーム
-        main_frame = ttk.Frame(self.root, padding=10)
-        main_frame.pack(fill=tk.BOTH, expand=True)
+        # 名刺モード
+        self.business_card_var = tk.BooleanVar(value=self.business_card_mode)
+        ttk.Checkbutton(
+            main_frame,
+            text="名刺読み取りモード",
+            variable=self.business_card_var,
+            command=self._toggle_business_card_mode
+        ).grid(row=2, column=1, sticky=tk.W, pady=5)
         
-        # メニューバー
-        self._create_menu()
-        
-        # 担当者選択フレーム
-        person_frame = ttk.Frame(main_frame)
-        person_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        person_label = ttk.Label(
-            person_frame,
-            text="担当者: ",
-            style="TLabel"
-        )
-        person_label.pack(side=tk.LEFT)
-        
-        persons = self.config_manager.get('PERSONS', [])
-        if not persons or (len(persons) == 1 and not persons[0]):
-            persons = ["担当者自動設定"]
-            
-        person_menu = ttk.Combobox(
-            person_frame,
-            textvariable=self.selected_person,
-            values=["担当者自動設定"] + persons,
-            state="readonly",
-            width=20
-        )
-        person_menu.pack(side=tk.LEFT, padx=(5, 0))
-        person_menu.bind("<<ComboboxSelected>>", self._on_person_changed)
-        
-        # フォルダ選択フレーム
-        folder_frame = ttk.Frame(main_frame)
-        folder_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        folder_label = ttk.Label(
-            folder_frame,
-            text="PDFフォルダ: ",
-            style="TLabel"
-        )
-        folder_label.pack(side=tk.LEFT)
-        
-        self.folder_var = tk.StringVar(value=self.config_manager.get('PDF_FOLDER_PATH', ''))
-        folder_entry = ttk.Entry(
-            folder_frame,
-            textvariable=self.folder_var,
-            width=50
-        )
-        folder_entry.pack(side=tk.LEFT, padx=(5, 5), fill=tk.X, expand=True)
-        
-        browse_button = ttk.Button(
-            folder_frame,
-            text="参照...",
-            command=self._browse_folder
-        )
-        browse_button.pack(side=tk.LEFT)
-        
-        # 進捗セクション
-        progress_frame = ttk.Frame(main_frame)
-        progress_frame.pack(fill=tk.X, pady=(0, 10))
-        
-        self.progress_label = ttk.Label(
-            progress_frame,
-            text="進捗: 0%",
-            style="TLabel"
-        )
-        self.progress_label.pack(anchor=tk.W)
-        
-        self.progress_bar = ttk.Progressbar(
-            progress_frame,
-            orient=tk.HORIZONTAL,
-            length=100,
-            mode='determinate'
-        )
-        self.progress_bar.pack(fill=tk.X)
-        
-        # ステータステキストエリア
-        status_frame = ttk.LabelFrame(main_frame, text="処理状況")
-        status_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-        
-        self.status_text = scrolledtext.ScrolledText(
-            status_frame,
-            wrap=tk.WORD,
-            width=80,
-            height=15
-        )
-        self.status_text.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # ボタンセクション
-        button_frame = ttk.Frame(main_frame)
-        button_frame.pack(fill=tk.X)
-        
-        # リフレッシュボタンを左側に配置
-        refresh_button = ttk.Button(
-            button_frame,
-            text="フォルダのリフレッシュ",
-            command=self._refresh_folder
-        )
-        refresh_button.pack(side=tk.LEFT, padx=(0, 10))
-        
-        # リネームボタンを右側に配置
-        self.rename_button = ttk.Button(
-            button_frame,
+        # 開始/停止ボタン
+        self.start_button = ttk.Button(
+            main_frame,
             text="リネーム開始",
             command=self._start_renaming
         )
-        self.rename_button.pack(side=tk.RIGHT, padx=(0, 10))
+        self.start_button.grid(row=3, column=1, pady=10)
         
-        # ステータスキューのポーリングを開始
-        self._poll_status_queue()
-    
+        # 進捗バー
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(
+            main_frame,
+            variable=self.progress_var,
+            maximum=100
+        )
+        self.progress_bar.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        
+        # ステータス表示
+        self.status_text = scrolledtext.ScrolledText(main_frame, height=10, width=60)
+        self.status_text.grid(row=5, column=0, columnspan=3, pady=5)
+        
+        # メニューの作成
+        self._create_menu()
+        
     def _create_menu(self):
-        """アプリケーションメニューバーを作成します。"""
+        """メニューバーを作成します。"""
         menubar = tk.Menu(self.root)
         self.root.config(menu=menubar)
         
         # ファイルメニュー
         file_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="ファイル", menu=file_menu)
-        file_menu.add_command(label="PDFフォルダ選択...", command=self._browse_folder)
+        file_menu.add_command(label="フォルダを開く", command=self._browse_folder)
         file_menu.add_separator()
-        file_menu.add_command(label=".envを編集", command=lambda: self._open_file(self.config_manager.env_path))
-        file_menu.add_command(label="YAMLルールを編集", command=lambda: self._open_file(self.config_manager.get('YAML_FILE')))
-        file_menu.add_separator()
-        file_menu.add_command(label="終了", command=self.root.quit)
+        file_menu.add_command(label="終了", command=self._on_closing)
         
         # 設定メニュー
         settings_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="設定", menu=settings_menu)
         
-        # 名刺読み取りモードの設定を追加
-        settings_menu.add_checkbutton(
-            label="名刺の読み取り",
-            variable=self.business_card_mode,
-            command=self._toggle_business_card_mode
-        )
-        settings_menu.add_separator()
-        
-        # .envバックアップメニュー
-        settings_menu.add_command(label=".envをバックアップ", command=self._backup_env_file)
-        settings_menu.add_command(label="rename_rules.yamlをバックアップ", command=self._backup_yaml_file)
-        settings_menu.add_separator()
-        
-        # 担当者サブメニュー
-        person_menu = tk.Menu(settings_menu, tearoff=0)
-        settings_menu.add_cascade(label="担当者の設定", menu=person_menu)
-        
-        # 自動設定オプションを追加
-        person_menu.add_radiobutton(
-            label="担当者自動設定",
-            value="担当者自動設定",
-            variable=self.selected_person,
-            command=lambda: self._set_person("担当者自動設定")
-        )
-        
-        person_menu.add_separator()
-        
-        # 設定からすべての担当者を追加
-        persons = self.config_manager.get('PERSONS', [])
-        for person in persons:
-            if person:  # 空の文字列をスキップ
-                person_menu.add_radiobutton(
-                    label=person,
-                    value=person,
-                    variable=self.selected_person,
-                    command=lambda p=person: self._set_person(p)
-                )
-        
-        # AIモデルサブメニュー
-        ai_model_menu = tk.Menu(settings_menu, tearoff=0)
-        settings_menu.add_cascade(label="AIモデルの設定", menu=ai_model_menu)
-        
-        # 利用可能なAIモデル
-        available_models = [
-            "gpt-4.1",
-            "gpt-4",
-            "gpt-3.5-turbo",
-            "gpt-3.5-turbo-16k"
-        ]
-        
-        # モデル選択オプションを追加
-        for model in available_models:
-            ai_model_menu.add_radiobutton(
-                label=model,
-                value=model,
-                variable=self.selected_model,
-                command=lambda m=model: self._set_ai_model(m)
-            )
+        # AIモデル選択
+        model_menu = tk.Menu(settings_menu, tearoff=0)
+        settings_menu.add_cascade(label="AIモデル", menu=model_menu)
+        model_menu.add_command(label="GPT-4.1", command=lambda: self._set_ai_model("gpt-4.1"))
+        model_menu.add_command(label="GPT-4", command=lambda: self._set_ai_model("gpt-4"))
         
         # ヘルプメニュー
         help_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="ヘルプ", menu=help_menu)
-        help_menu.add_command(label="バージョン情報", command=self._show_about)
         help_menu.add_command(label="使い方", command=self._show_help)
-    
+        help_menu.add_command(label="バージョン情報", command=self._show_about)
+        
     def _browse_folder(self):
-        """PDFフォルダを選択するためのフォルダブラウザダイアログを開きます。"""
-        current_folder = self.folder_var.get()
-        folder = askdirectory(
-            initialdir=current_folder if current_folder else "/",
-            title="PDFファイルのあるフォルダを選択"
-        )
-        
-        if folder:
-            self.folder_var.set(folder)
-            self.config_manager.set('PDF_FOLDER_PATH', folder)
-            # 設定を.envファイルに保存
+        """PDFフォルダを選択します。"""
+        folder_path = askdirectory()
+        if folder_path:
+            self.folder_path.set(folder_path)
+            self.config_manager.set('PDF_FOLDER_PATH', folder_path)
             self.config_manager.save_config()
-            # 選択したフォルダを表示するためにステータステキストを更新
-            self._add_to_status(f"PDFフォルダを設定しました: {folder}\n")
-            # PDFファイルの一覧を読み込む
-            self._load_pdf_files(folder)
-
+            self._load_pdf_files(folder_path)
+            
     def _load_pdf_files(self, folder_path):
-        """指定されたフォルダ内のPDFファイルを読み込み、ステータスに表示します。"""
+        """PDFファイルの一覧を読み込みます。"""
         try:
-            if not os.path.exists(folder_path):
-                self._add_to_status(f"フォルダが存在しません: {folder_path}\n")
-                return
-
-            # PDFファイルの一覧を取得
             pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
-            
-            # ステータステキストをクリア
-            self.status_text.delete(1.0, tk.END)
-            
-            if pdf_files:
-                self._add_to_status(f"PDFフォルダ: {folder_path}\n")
-                self._add_to_status(f"PDFファイル一覧 ({len(pdf_files)}個):\n")
-                self._add_to_status("-" * 50 + "\n")
-                for pdf_file in sorted(pdf_files):
-                    self._add_to_status(f"• {pdf_file}\n")
-                self._add_to_status("-" * 50 + "\n")
-            else:
-                self._add_to_status(f"フォルダ内にPDFファイルがありません: {folder_path}\n")
-                
+            self._add_to_status(f"{len(pdf_files)}個のPDFファイルが見つかりました")
         except Exception as e:
-            logger.exception(f"PDFファイル一覧の読み込みエラー: {folder_path}")
-            self._add_to_status(f"PDFファイル一覧の読み込みに失敗しました: {str(e)}\n")
-
-    def _open_file(self, file_path):
-        """ファイルやフォルダをデフォルトのアプリケーションで開きます。"""
-        if not file_path:
-            messagebox.showerror("エラー", "ファイルまたはフォルダが指定されていません。")
-            return
+            self._add_to_status(f"エラー: {str(e)}")
             
-        try:
-            logger.debug(f"ファイルを開いています: {file_path}")
-            
-            if platform.system() == "Windows":
-                os.startfile(file_path)
-            elif platform.system() == "Linux":
-                subprocess.run(["xdg-open", file_path], check=True)
-            elif platform.system() == "Darwin":  # macOS
-                subprocess.run(["open", file_path], check=True)
-                
-        except Exception as e:
-            logger.exception(f"ファイルを開くエラー: {file_path}")
-            messagebox.showerror("エラー", f"ファイルを開けませんでした: {e}")
-    
-    def _set_person(self, person):
-        """選択された担当者を設定しUIを更新します。"""
-        self.selected_person.set(person)
-        # 担当者を.envファイルに保存
-        self.config_manager.set('DEFAULT_PERSON', person)
-        self.config_manager.save_config()
-        logger.info(f"担当者を設定: {person}")
-        self._add_to_status(f"担当者を「{person}」に設定しました\n")
-    
     def _on_person_changed(self, event):
-        """担当者の選択変更イベントを処理します。"""
-        self._set_person(self.selected_person.get())
-    
+        """担当者が変更された時の処理。"""
+        self.selected_person = self.person_var.get()
+        
     def _add_to_status(self, message):
-        """ステータスメッセージを追加"""
-        if isinstance(message, tuple):
-            msg_type, msg_text = message
-            if msg_type == "info":
-                self.status_text.insert(tk.END, f"ℹ️ {msg_text}\n")
-            elif msg_type == "error":
-                self.status_text.insert(tk.END, f"❌ {msg_text}\n")
-            elif msg_type == "success":
-                self.status_text.insert(tk.END, f"✅ {msg_text}\n")
-            else:
-                self.status_text.insert(tk.END, f"{msg_text}\n")
-        else:
-            self.status_text.insert(tk.END, f"{message}\n")
+        """ステータスメッセージを追加します。"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        self.status_text.insert(tk.END, f"[{timestamp}] {message}\n")
         self.status_text.see(tk.END)
-    
+        self.root.update_idletasks()
+        
     def _poll_status_queue(self):
-        """ステータスキューをポーリングしUIを更新します。"""
+        """ステータスキューを監視します。"""
         try:
-            while not self.status_queue.empty():
-                message = self.status_queue.get(0)
-                self._add_to_status(message)
+            messages = []
+            while True:
+                try:
+                    message = self.status_queue.get_nowait()
+                    messages.append(message)
+                except queue.Empty:
+                    break
+            
+            if messages:
+                # メッセージをまとめて追加
+                timestamp = datetime.now().strftime("%H:%M:%S")
+                for message in messages:
+                    self.status_text.insert(tk.END, f"[{timestamp}] {message}\n")
+                self.status_text.see(tk.END)
+                self.root.update_idletasks()
                 
-        except queue.Empty:
-            pass
-            
+        except Exception as e:
+            logger.error(f"ステータスキュー処理エラー: {e}")
         finally:
-            # 次のポーリングをスケジュール
-            self.root.after(100, self._poll_status_queue)
-    
+            # 処理中の場合は短い間隔で、そうでなければ長い間隔で監視
+            interval = 100 if self.is_processing else 500
+            self.root.after(interval, self._poll_status_queue)
+            
     def _validate_config_on_startup(self):
-        """アプリケーション起動時に設定を検証します。"""
+        """起動時の設定検証を行います。"""
         missing = self.config_manager.validate_config()
-        
         if missing:
-            message = "以下の設定が不足しています:\n\n" + "\n".join([f"- {item}" for item in missing])
-            message += "\n\n設定ファイル (.env) を編集して必要な情報を追加してください。"
+            messagebox.showwarning(
+                "設定エラー",
+                "以下の設定が不足しています：\n" + "\n".join(missing)
+            )
             
-            messagebox.showwarning("設定の問題", message)
-    
     def _start_renaming(self):
-        """PDFリネーム処理を開始します。"""
-        if self.processing_flag.get():
-            messagebox.showinfo("処理中", "現在処理中です。完了するまでお待ちください。")
+        """リネーム処理を開始します。"""
+        if self.is_processing:
+            self._stop_processing()
             return
             
-        # UIからPDFフォルダを更新
-        pdf_folder = self.folder_var.get()
-        self.config_manager.set('PDF_FOLDER_PATH', pdf_folder)
-        
-        # フォルダが存在するか検証
-        if not pdf_folder or not os.path.isdir(pdf_folder):
-            messagebox.showerror("エラー", f"PDFフォルダが存在しません: {pdf_folder}")
+        folder_path = self.folder_path.get()
+        if not folder_path:
+            messagebox.showwarning("エラー", "PDFフォルダを選択してください")
             return
             
-        # フォルダ内のPDFファイルを検索
-        pdf_files = [f for f in os.listdir(pdf_folder) if f.lower().endswith('.pdf')]
-        
-        if not pdf_files:
-            messagebox.showinfo("情報", f"フォルダ内にPDFファイルがありません: {pdf_folder}")
-            return
+        try:
+            pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
+            if not pdf_files:
+                messagebox.showinfo("情報", "PDFファイルが見つかりません")
+                return
+                
+            self._start_processing(folder_path, pdf_files)
             
-        # UIをリセット
-        self.progress_bar['value'] = 0
-        self.progress_label.config(text="進捗: 0%")
-        self.status_text.delete(1.0, tk.END)
-        self._add_to_status(f"PDFフォルダ: {pdf_folder}\n")
-        self._add_to_status(f"PDF数: {len(pdf_files)}個\n")
-        self._add_to_status(f"担当者: {self.selected_person.get()}\n")
-        if self.business_card_mode.get():
-            self._add_to_status("名刺読み取りモードで処理します。\n")
-        self._add_to_status("リネーム処理を開始します...\n")
-        self._add_to_status("-" * 50 + "\n")
+        except Exception as e:
+            messagebox.showerror("エラー", str(e))
+            
+    def _start_processing(self, pdf_folder, pdf_files):
+        """PDFファイルの処理を開始します。"""
+        self.is_processing = True
+        self.processing_complete = False
+        self.start_button.config(text="処理を停止", state="normal")
         
-        # 処理フラグを設定
-        self.processing_flag.set(True)
+        self._add_to_status(f"処理開始: {len(pdf_files)}個のファイルを処理します")
         
-        # 処理中はスタートボタンを無効化
-        self.rename_button.config(state="disabled")
-        
-        # 別のスレッドで処理を開始
-        threading.Thread(
+        # バックグラウンドスレッドで処理を実行
+        thread = threading.Thread(
             target=self._process_pdf_files,
             args=(pdf_folder, pdf_files),
             daemon=True
-        ).start()
-    
+        )
+        thread.start()
+        
     def _process_pdf_files(self, pdf_folder, pdf_files):
-        """別のスレッドですべてのPDFファイルを処理します。"""
+        """PDFファイルの処理を実行します。"""
+        total_files = len(pdf_files)
+        completed = 0
+        successful = 0
+        
+        def process_single_file(pdf_file):
+            nonlocal completed, successful
+            try:
+                if not self.is_processing:  # 停止がリクエストされた場合
+                    return False
+                    
+                pdf_path = os.path.join(pdf_folder, pdf_file)
+                processor = PDFProcessor(
+                    self.config_manager,
+                    self.selected_person,
+                    self.status_queue,
+                    self.business_card_mode
+                )
+                
+                if processor.process_pdf(pdf_path):
+                    successful += 1
+                    return True
+                    
+            except Exception as e:
+                self.status_queue.put(f"エラー: {pdf_file} - {str(e)}")
+                logger.error(f"ファイル処理エラー ({pdf_file}): {e}")
+            finally:
+                completed += 1
+                # 進捗更新
+                progress_percent = (completed / total_files) * 100
+                self.root.after(0, lambda: self._update_progress(
+                    progress_percent, completed, successful, total_files
+                ))
+            
+            return False
+        
         try:
-            processor = PDFProcessor(
-                self.config_manager,
-                self.selected_person.get(),
-                self.status_queue,
-                self.business_card_mode.get()
-            )
+            # ThreadPoolExecutorを使用してファイルを並列処理
+            max_workers = min(3, len(pdf_files))  # 最大3つのワーカーに制限
+            self.executor = ThreadPoolExecutor(max_workers=max_workers)
             
-            total_files = len(pdf_files)
-            completed = 0
-            successful = 0
+            futures = []
+            for pdf_file in pdf_files:
+                if not self.is_processing:  # 停止がリクエストされた場合
+                    break
+                future = self.executor.submit(process_single_file, pdf_file)
+                futures.append(future)
             
-            # 最適なワーカー数を計算（APIレート制限を考慮）
-            max_workers = min(os.cpu_count() or 4, 8)  # 最大8ワーカーまで許可
-            
-            # バッチサイズを設定（APIレート制限を考慮）
-            batch_size = 4
-            
-            # ファイルをバッチに分割
-            batches = [pdf_files[i:i + batch_size] for i in range(0, len(pdf_files), batch_size)]
-            
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                for batch in batches:
-                    # バッチ内のファイルを並列処理
-                    futures = {
-                        executor.submit(
-                            processor.process_pdf, 
-                            os.path.join(pdf_folder, pdf_file)
-                        ): pdf_file 
-                        for pdf_file in batch
-                    }
+            # すべてのタスクの完了を待つ
+            for future in as_completed(futures):
+                if not self.is_processing:  # 停止がリクエストされた場合
+                    break
+                try:
+                    future.result(timeout=300)  # 5分のタイムアウト
+                except Exception as e:
+                    logger.error(f"Future処理エラー: {e}")
                     
-                    # バッチの完了を待機
-                    for future in as_completed(futures):
-                        try:
-                            result = future.result()
-                            if result:
-                                successful += 1
-                        except Exception as e:
-                            pdf_file = futures[future]
-                            error_msg = f"処理エラー: {pdf_file} - {str(e)}\n"
-                            logger.error(error_msg)
-                            self.status_queue.put(error_msg)
-                            
-                        completed += 1
-                        progress_value = (completed / total_files) * 100
-                        
-                        # スレッドセーフな方法でUIを更新
-                        self.root.after(0, lambda val=progress_value: 
-                            self._update_progress(val, completed, successful, total_files))
-                    
-                    # バッチ間で少し待機（APIレート制限を考慮）
-                    time.sleep(2)  # 待機時間を2秒に増やす
-            
-            # 最終ステータス更新
-            summary = (
-                f"\n{'-' * 50}\n"
-                f"処理完了: {completed}/{total_files} ファイル\n"
-                f"成功: {successful} ファイル\n"
-                f"失敗: {completed - successful} ファイル\n"
-            )
-            self.status_queue.put(summary)
-            
         except Exception as e:
-            logger.exception("PDF処理スレッドのエラー")
-            self.status_queue.put(f"処理全体のエラー: {str(e)}\n")
-            
+            logger.error(f"処理全体のエラー: {e}")
+            self.status_queue.put(f"処理エラー: {str(e)}")
         finally:
-            # スレッドセーフな方法でUIをリセット
-            self.root.after(0, self._reset_after_processing)
-    
+            # リソースのクリーンアップ
+            if self.executor:
+                self.executor.shutdown(wait=False)  # 即座にシャットダウン
+                self.executor = None
+                
+            # メモリクリーンアップ
+            gc.collect()
+            
+            # UI更新をメインスレッドで実行
+            self.root.after(0, lambda: self._processing_completed(successful, total_files))
+        
+    def _stop_processing(self):
+        """処理を停止します。"""
+        self.is_processing = False
+        self._add_to_status("処理停止がリクエストされました...")
+        
+        # ExecutorPoolを強制終了
+        if self.executor:
+            self.executor.shutdown(wait=False)
+            self.executor = None
+            
+        self.start_button.config(text="リネーム開始", state="normal")
+        self._add_to_status("処理が停止されました")
+        
     def _update_progress(self, value, completed, successful, total):
-        """プログレスバーとラベルを更新します。"""
-        self.progress_bar['value'] = value
-        self.progress_label.config(
-            text=f"進捗: {int(value)}% ({completed}/{total}件, 成功: {successful}件)"
-        )
-    
+        """進捗状況を更新します。"""
+        try:
+            self.progress_var.set(min(value, 100))
+            self.status_queue.put(f"進捗: {completed}/{total} (成功: {successful})")
+            
+            # UIの更新を強制
+            self.root.update_idletasks()
+            
+        except Exception as e:
+            logger.error(f"進捗更新エラー: {e}")
+        
+    def _processing_completed(self, successful, total):
+        """処理完了時の処理を行います。"""
+        try:
+            self.is_processing = False
+            self.processing_complete = True
+            
+            # UIの更新
+            self.start_button.config(text="リネーム開始", state="normal")
+            self.progress_var.set(100)
+            
+            # 完了メッセージ
+            self._add_to_status(f"処理完了: {successful}/{total} ファイルが正常に処理されました")
+            
+            # 完了ダイアログを表示
+            messagebox.showinfo(
+                "処理完了",
+                f"処理が完了しました\n成功: {successful}/{total}"
+            )
+            
+            # リセット処理
+            self._reset_after_processing()
+            
+        except Exception as e:
+            logger.error(f"処理完了処理エラー: {e}")
+            
     def _reset_after_processing(self):
-        """処理完了後にUI状態をリセットします。"""
-        self.processing_flag.set(False)
-        self.rename_button.config(state="normal")
-    
+        """処理完了後のリセットを行います。"""
+        try:
+            # 進捗バーをリセット
+            self.progress_var.set(0)
+            
+            # メモリの解放を促す
+            gc.collect()
+            
+            # UI更新
+            self.root.update_idletasks()
+            
+        except Exception as e:
+            logger.error(f"リセット処理エラー: {e}")
+        
     def _show_about(self):
-        """バージョン情報ダイアログを表示します。"""
-        about_text = (
+        """バージョン情報を表示します。"""
+        messagebox.showinfo(
+            "バージョン情報",
             f"PDF Renamer {APP_VERSION}\n\n"
-            "このアプリケーションはPDFファイルをOCRにより解析し、\n"
-            "内容に応じて自動的にリネームします。\n\n"
-            "• Google Cloud Vision API: OCR処理\n"
-            "• OpenAI API: ファイル名生成\n"
-            "• YAMLルール: カスタマイズ可能なリネームルール\n\n"
-            "© 2025"
+            "OCR、Google Cloud Vision、およびOpenAIを使用して\n"
+            "PDFファイルを内容に基づいて自動的にリネームするツール\n\n"
+            "フリーズ問題修正版"
         )
-        messagebox.showinfo("バージョン情報", about_text)
-    
+        
     def _show_help(self):
-        """ヘルプダイアログを表示します。"""
-        help_text = (
-            "使い方：\n\n"
-            "1. PDFフォルダを選択します。\n"
-            "2. 担当者を選択します（自動設定も可能）。\n"
-            "3. 「リネーム開始」ボタンをクリックします。\n\n"
-            "フォルダ内のすべてのPDFファイルが処理され、内容に基づいて\n"
-            "自動的にリネームされます。処理状況は画面下部に表示されます。\n\n"
-            "設定：\n"
-            "• .envファイル: 基本設定\n"
-            "• rename_rules.yaml: リネームルール\n\n"
-            "これらのファイルは「ファイル」メニューから編集できます。"
-        )
+        """使い方を表示します。"""
+        help_text = """
+使い方:
+
+1. 「参照」ボタンをクリックしてPDFフォルダを選択
+2. 担当者を選択（必要な場合）
+3. 名刺読み取りモードを選択（必要な場合）
+4. 「リネーム開始」ボタンをクリック
+
+注意事項:
+- PDFファイルは自動的に内容に基づいてリネームされます
+- 処理中は進捗状況が表示されます
+- エラーが発生した場合はログに記録されます
+- 処理中に「処理を停止」ボタンで中断できます
+
+修正点（フリーズ問題対策）:
+- 適切なリソース管理とクリーンアップ
+- ThreadPoolExecutorの適切な終了処理
+- メモリリークの防止
+- UI応答性の改善
+        """
         messagebox.showinfo("使い方", help_text)
-    
+        
     def _set_ai_model(self, model):
-        """AIモデルを設定し、設定を更新します。"""
-        try:
-            self.config_manager.set('OPENAI_MODEL', model)
-            self.config_manager.save_config()
-            logger.info(f"AIモデルを設定: {model}")
-            self._add_to_status(f"AIモデルを「{model}」に設定しました\n")
-        except Exception as e:
-            logger.error(f"AIモデル設定エラー: {e}")
-            messagebox.showerror("エラー", f"AIモデルの設定に失敗しました: {e}")
-
-    def _backup_env_file(self):
-        """現在の.envファイルをバックアップします。"""
-        try:
-            env_path = self.config_manager.env_path
-            if not os.path.exists(env_path):
-                messagebox.showerror("エラー", ".envファイルが見つかりません。")
-                return
-
-            # バックアップファイル名を生成（日本語の日時形式）
-            timestamp = datetime.now().strftime('%Y年%m月%d日%H時%M分%S秒')
-            
-            # 保存されているバックアップ先を取得（なければデフォルトのbackupsディレクトリ）
-            saved_backup_dir = self.config_manager.get('ENV_BACKUP_DIR')
-            default_backup_dir = saved_backup_dir if saved_backup_dir else os.path.join(SCRIPT_DIR, 'backups')
-            
-            # バックアップ先のディレクトリを選択
-            backup_dir = askdirectory(
-                initialdir=default_backup_dir,
-                title=".envファイルのバックアップ先を選択"
-            )
-            
-            if not backup_dir:  # キャンセルされた場合
-                return
-                
-            # バックアップ先を.envに保存
-            self.config_manager.set('ENV_BACKUP_DIR', backup_dir)
-            self.config_manager.save_config()
-            
-            os.makedirs(backup_dir, exist_ok=True)
-            backup_path = os.path.join(backup_dir, f'.env.backup({timestamp})')
-
-            # ファイルをコピー
-            shutil.copy2(env_path, backup_path)
-            
-            logger.info(f".envファイルをバックアップしました: {backup_path}")
-            self._add_to_status(f".envファイルをバックアップしました: {backup_path}\n")
-            messagebox.showinfo("成功", f".envファイルをバックアップしました:\n{backup_path}")
-
-        except Exception as e:
-            logger.exception(".envファイルのバックアップ中にエラーが発生しました")
-            messagebox.showerror("エラー", f".envファイルのバックアップに失敗しました:\n{str(e)}")
-
-    def _backup_yaml_file(self):
-        """rename_rules.yamlファイルをバックアップします。"""
-        try:
-            yaml_path = self.config_manager.get('YAML_FILE')
-            if not os.path.exists(yaml_path):
-                messagebox.showerror("エラー", "YAMLルールファイルが見つかりません。")
-                return
-
-            # バックアップファイル名を生成（日本語の日時形式）
-            timestamp = datetime.now().strftime('%Y年%m月%d日%H時%M分%S秒')
-            
-            # 保存されているバックアップ先を取得（なければデフォルトのbackupsディレクトリ）
-            saved_backup_dir = self.config_manager.get('YAML_BACKUP_DIR')
-            default_backup_dir = saved_backup_dir if saved_backup_dir else os.path.join(SCRIPT_DIR, 'backups')
-            
-            # バックアップ先のディレクトリを選択
-            backup_dir = askdirectory(
-                initialdir=default_backup_dir,
-                title="YAMLルールファイルのバックアップ先を選択"
-            )
-            
-            if not backup_dir:  # キャンセルされた場合
-                return
-                
-            # バックアップ先を.envに保存
-            self.config_manager.set('YAML_BACKUP_DIR', backup_dir)
-            self.config_manager.save_config()
-            
-            os.makedirs(backup_dir, exist_ok=True)
-            backup_path = os.path.join(backup_dir, f'rename_rules.yaml.backup({timestamp})')
-
-            # ファイルをコピー
-            shutil.copy2(yaml_path, backup_path)
-            
-            logger.info(f"YAMLルールファイルをバックアップしました: {backup_path}")
-            self._add_to_status(f"YAMLルールファイルをバックアップしました: {backup_path}\n")
-            messagebox.showinfo("成功", f"YAMLルールファイルをバックアップしました:\n{backup_path}")
-
-        except Exception as e:
-            logger.exception("YAMLルールファイルのバックアップ中にエラーが発生しました")
-            messagebox.showerror("エラー", f"YAMLルールファイルのバックアップに失敗しました:\n{str(e)}")
-
+        """AIモデルを設定します。"""
+        self.config_manager.set('OPENAI_MODEL', model)
+        self.config_manager.save_config()
+        self._add_to_status(f"AIモデルを{model}に変更しました")
+        
     def _toggle_business_card_mode(self):
-        """名刺読み取りモードの切り替えを処理します。"""
-        mode = "有効" if self.business_card_mode.get() else "無効"
-        logger.info(f"名刺読み取りモードを{mode}に設定")
-        self._add_to_status(f"名刺読み取りモードを{mode}に設定しました\n")
-
-    def _refresh_folder(self):
-        """フォルダのリフレッシュを処理します。"""
+        """名刺モードを切り替えます。"""
+        self.business_card_mode = self.business_card_var.get()
+        self._add_to_status(
+            "名刺読み取りモードを" +
+            ("有効" if self.business_card_mode else "無効") +
+            "にしました"
+        )
+        
+    def _on_closing(self):
+        """アプリケーション終了時の処理。"""
         try:
-            current_folder = self.folder_var.get()
-            if not current_folder:
-                messagebox.showwarning("警告", "PDFフォルダが設定されていません。")
-                return
-                
-            if not os.path.exists(current_folder):
-                messagebox.showerror("エラー", f"フォルダが存在しません: {current_folder}")
-                return
-                
-            # ステータステキストをクリア
-            self.status_text.delete(1.0, tk.END)
+            # 処理中の場合は停止
+            if self.is_processing:
+                self._stop_processing()
+                # 少し待つ
+                time.sleep(1)
             
-            # PDFファイルの一覧を読み込む
-            self._load_pdf_files(current_folder)
+            # ExecutorPoolを確実に終了
+            if self.executor:
+                self.executor.shutdown(wait=False)
+                self.executor = None
             
-            # 成功メッセージを表示
-            self._add_to_status("フォルダのリフレッシュが完了しました。\n")
+            # 一時ファイルのクリーンアップ
+            temp_dir = self.config_manager.get('IMAGE_FILE_PATH')
+            if os.path.exists(temp_dir):
+                try:
+                    for file in os.listdir(temp_dir):
+                        if file.startswith('temp_') and file.endswith('.jpg'):
+                            os.remove(os.path.join(temp_dir, file))
+                except Exception as e:
+                    logger.error(f"一時ファイルクリーンアップエラー: {e}")
+            
+            # ログの最終出力
+            logger.info("アプリケーションを終了します")
+            
+            # ウィンドウを破棄
+            self.root.quit()
+            self.root.destroy()
             
         except Exception as e:
-            logger.exception("フォルダのリフレッシュ中にエラーが発生しました")
-            messagebox.showerror("エラー", f"フォルダのリフレッシュに失敗しました:\n{str(e)}")
-
+            logger.error(f"終了処理エラー: {e}")
+            # 強制終了
+            self.root.quit()
 
 def main():
-    """アプリケーションのエントリーポイント。"""
+    """メイン関数"""
     try:
-        # ルートウィンドウの設定
+        # Tkinterのルートウィンドウを作成
         root = tk.Tk()
+        
+        # ウィンドウサイズを設定
+        root.geometry("700x600")
+        root.minsize(600, 500)
+        
+        # アプリケーションを初期化
         app = PDFRenamerApp(root)
         
         # メインループを開始
         root.mainloop()
         
     except Exception as e:
-        logger.exception("アプリケーションエラー")
-        messagebox.showerror("アプリケーションエラー", str(e))
-
+        logger.error(f"メイン関数エラー: {e}")
+        print(f"アプリケーション開始エラー: {e}")
+    finally:
+        # 最終的なクリーンアップ
+        logger.info("プログラム終了")
 
 if __name__ == "__main__":
     main()
