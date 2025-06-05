@@ -14,7 +14,7 @@ import sys
 import time
 import logging
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 from tkinter.filedialog import askdirectory
 import threading
 import queue
@@ -836,7 +836,38 @@ class PDFRenamerApp:
         
     def _save_rules(self):
         """ルールを保存します。"""
-        self._add_to_status("ルールの保存機能は準備中です")
+        try:
+            # デフォルトのファイル名を生成
+            timestamp = datetime.now().strftime("%Y年%m月%d日%H時%M分%S秒")
+            default_filename = f"rename_rules.yaml.backup({timestamp})"
+            
+            # ファイル保存ダイアログを表示
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".yaml",
+                initialfile=default_filename,
+                filetypes=[("YAML files", "*.yaml"), ("All files", "*.*")],
+                title="ルールファイルの保存"
+            )
+            
+            if file_path:
+                # 現在のルールを読み込む
+                with open(self.config_manager.get('YAML_FILE'), 'r', encoding='utf-8') as source:
+                    rules_content = source.read()
+                
+                # 新しいファイルに保存
+                with open(file_path, 'w', encoding='utf-8') as target:
+                    target.write(rules_content)
+                
+                self._add_to_status(f"ルールを保存しました: {os.path.basename(file_path)}")
+                messagebox.showinfo("保存完了", f"ルールを保存しました:\n{file_path}")
+            else:
+                self._add_to_status("ルールの保存をキャンセルしました")
+                
+        except Exception as e:
+            error_msg = f"ルールの保存中にエラーが発生しました: {str(e)}"
+            logger.error(error_msg)
+            self._add_to_status(error_msg)
+            messagebox.showerror("エラー", error_msg)
         
     def _save_env_vars(self):
         """環境変数を保存します。"""
