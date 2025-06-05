@@ -871,7 +871,38 @@ class PDFRenamerApp:
         
     def _save_env_vars(self):
         """環境変数を保存します。"""
-        self._add_to_status("環境変数の保存機能は準備中です")
+        try:
+            # デフォルトのファイル名を生成
+            timestamp = datetime.now().strftime("%Y年%m月%d日%H時%M分%S秒")
+            default_filename = f".env.backup({timestamp})"
+            
+            # ファイル保存ダイアログを表示
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".env",
+                initialfile=default_filename,
+                filetypes=[("Environment files", "*.env"), ("All files", "*.*")],
+                title="環境変数ファイルの保存"
+            )
+            
+            if file_path:
+                # 現在の環境変数を読み込む
+                with open(self.config_manager.env_path, 'r', encoding='utf-8') as source:
+                    env_content = source.read()
+                
+                # 新しいファイルに保存
+                with open(file_path, 'w', encoding='utf-8') as target:
+                    target.write(env_content)
+                
+                self._add_to_status(f"環境変数を保存しました: {os.path.basename(file_path)}")
+                messagebox.showinfo("保存完了", f"環境変数を保存しました:\n{file_path}")
+            else:
+                self._add_to_status("環境変数の保存をキャンセルしました")
+                
+        except Exception as e:
+            error_msg = f"環境変数の保存中にエラーが発生しました: {str(e)}"
+            logger.error(error_msg)
+            self._add_to_status(error_msg)
+            messagebox.showerror("エラー", error_msg)
         
     def _toggle_business_card_mode(self):
         """名刺モードを切り替えます。"""
