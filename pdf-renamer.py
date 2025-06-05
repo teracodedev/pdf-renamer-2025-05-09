@@ -515,6 +515,12 @@ class PDFRenamerApp:
         settings_menu.add_cascade(label="AIモデル", menu=model_menu)
         model_menu.add_command(label="GPT-4.1", command=lambda: self._set_ai_model("gpt-4.1"))
         model_menu.add_command(label="GPT-4", command=lambda: self._set_ai_model("gpt-4"))
+
+        # ルールメニュー
+        rules_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="ルール", menu=rules_menu)
+        rules_menu.add_command(label="ルールの保存", command=self._save_rules)
+        rules_menu.add_command(label="環境変数の保存", command=self._save_env_vars)
         
         # ヘルプメニュー
         help_menu = tk.Menu(menubar, tearoff=0)
@@ -827,6 +833,14 @@ class PDFRenamerApp:
         self.config_manager.set('OPENAI_MODEL', model)
         self.config_manager.save_config()
         self._add_to_status(f"AIモデルを{model}に変更しました")
+        
+    def _save_rules(self):
+        """ルールを保存します。"""
+        self._add_to_status("ルールの保存機能は準備中です")
+        
+    def _save_env_vars(self):
+        """環境変数を保存します。"""
+        self._add_to_status("環境変数の保存機能は準備中です")
         
     def _toggle_business_card_mode(self):
         """名刺モードを切り替えます。"""
