@@ -223,6 +223,34 @@ class PDFProcessor:
         except Exception as e:
             logger.error(f"YAMLルールの読み込みエラー: {e}")
             raise
+
+    def _check_applicable_rules(self, ocr_text):
+        """OCRテキストに対して適用可能なルールを確認します。"""
+        applicable_rules = []
+        total_rules = len(self.rules)
+        
+        self.status_queue.put(f"ルールの総数: {total_rules}個")
+        logger.info(f"ルールの総数: {total_rules}個")
+        
+        for rule in self.rules:
+            try:
+                pattern = rule.get('正規表現', '')
+                if pattern:
+                    if re.search(pattern, ocr_text, re.IGNORECASE):
+                        applicable_rules.append(rule)
+                        rule_info = f"ルール適用: {rule.get('説明', '説明なし')} (パターン: {pattern})"
+                        self.status_queue.put(rule_info)
+                        logger.info(rule_info)
+            except Exception as e:
+                error_msg = f"ルール適用エラー: {rule.get('説明', '説明なし')} - {str(e)}"
+                self.status_queue.put(error_msg)
+                logger.error(error_msg)
+        
+        if not applicable_rules:
+            self.status_queue.put("適用可能なルールが見つかりませんでした")
+            logger.warning("適用可能なルールが見つかりませんでした")
+        
+        return applicable_rules
             
     def process_pdf(self, pdf_file_path):
         """PDFファイルを処理し、新しいファイル名を生成します。"""
@@ -246,8 +274,11 @@ class PDFProcessor:
             # OCR結果を結合
             combined_ocr = "\n".join(ocr_results)
             
-            # ChatGPT-4でファイル名を生成
-            new_name = self._generate_filename_with_gpt4(combined_ocr, pdf_file_path)
+            # 適用可能なルールを確認
+            applicable_rules = self._check_applicable_rules(combined_ocr)
+            
+            # ChatGPT-4でファイル名を生成（適用可能なルールのみを使用）
+            new_name = self._generate_filename_with_gpt4(combined_ocr, pdf_file_path, applicable_rules)
             
             # ファイル名の正規化
             new_name = self._normalize_filename(new_name)
@@ -312,7 +343,7 @@ class PDFProcessor:
             logger.error(f"OCRエラー: {e}")
             return None
             
-    def _generate_filename_with_gpt4(self, ocr_text, pdf_file_path):
+    def _generate_filename_with_gpt4(self, ocr_text, pdf_file_path, applicable_rules):
         """ChatGPT-4を使用してファイル名を生成します。"""
         try:
             # 現在の日付を取得
@@ -328,8 +359,8 @@ class PDFProcessor:
             現在の日付: {current_date}
             担当者: {self.selected_person}
             
-            以下のルールに従ってファイル名を生成してください：
-            {json.dumps(self.rules, ensure_ascii=False, indent=2)}
+            以下の適用可能なルールに従ってファイル名を生成してください：
+            {json.dumps(applicable_rules, ensure_ascii=False, indent=2)}
             
             ファイル名は以下の形式で出力してください：
             {{"filename": "生成されたファイル名"}}
