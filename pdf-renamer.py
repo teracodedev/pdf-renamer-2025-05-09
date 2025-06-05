@@ -55,14 +55,6 @@ APP_VERSION = "2025年6月4日バージョン（フリーズ問題修正版）"
 # ログの設定
 log_file_path = os.path.join(SCRIPT_DIR, "pdf-renamer.log")
 
-# 既存のログファイルを削除
-if os.path.exists(log_file_path):
-    try:
-        os.remove(log_file_path)
-        print(f"既存のログファイルを削除しました: {log_file_path}")
-    except Exception as e:
-        print(f"ログファイルの削除に失敗しました: {e}")
-
 # 既存のハンドラーをクリア
 for handler in logging.root.handlers[:]:
     logging.root.removeHandler(handler)
@@ -605,6 +597,33 @@ class PDFRenamerApp:
             return
             
         try:
+            # ログファイルを再作成
+            if os.path.exists(log_file_path):
+                try:
+                    os.remove(log_file_path)
+                    print(f"既存のログファイルを削除しました: {log_file_path}")
+                except Exception as e:
+                    print(f"ログファイルの削除に失敗しました: {e}")
+
+            # 既存のハンドラーをクリア
+            for handler in logging.root.handlers[:]:
+                logging.root.removeHandler(handler)
+
+            # ログの基本設定を再設定
+            logging.basicConfig(
+                level=logging.DEBUG,
+                format='%(asctime)s - %(levelname)s - %(message)s',
+                handlers=[
+                    logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),
+                    logging.StreamHandler()
+                ]
+            )
+
+            logger.debug("=" * 50)
+            logger.debug("リネーム処理開始")
+            logger.debug(f"ログファイルの出力先: {log_file_path}")
+            logger.debug("=" * 50)
+
             pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
             if not pdf_files:
                 messagebox.showinfo("情報", "PDFファイルが見つかりません")
