@@ -209,6 +209,12 @@ class PDFProcessor:
         self.openai_client = OpenAI(api_key=self.config_manager.get('OPENAI_API_KEY'))
         self.vision_client = vision.ImageAnnotatorClient()
         
+        # パフォーマンス最適化のための設定
+        self.image_cache = {}
+        self.ocr_cache = {}
+        self.max_cache_size = 100  # キャッシュサイズの制限
+        self.dpi = 200  # DPIを300から200に下げて処理を高速化
+        
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
         logger.debug(f"名刺読み取りモード: {business_card_mode}")
@@ -261,18 +267,16 @@ class PDFProcessor:
             if not image_paths:
                 raise Exception("PDFの画像変換に失敗しました")
                 
-            # OCR処理
-            ocr_results = []
-            for image_path in image_paths:
-                ocr_result = self._ocr_jpeg(image_path)
-                if ocr_result:
-                    ocr_results.append(ocr_result)
+            # OCR処理を並列化
+            with ThreadPoolExecutor(max_workers=min(4, len(image_paths))) as executor:
+                ocr_futures = [executor.submit(self._ocr_jpeg, path) for path in image_paths]
+                ocr_results = [future.result() for future in as_completed(ocr_futures)]
                     
-            if not ocr_results:
+            if not any(ocr_results):
                 raise Exception("OCR処理に失敗しました")
                 
             # OCR結果を結合
-            combined_ocr = "\n".join(ocr_results)
+            combined_ocr = "\n".join(filter(None, ocr_results))
             
             # 適用可能なルールを確認
             applicable_rules = self._check_applicable_rules(combined_ocr)
@@ -301,10 +305,15 @@ class PDFProcessor:
     def _pdf_to_jpeg(self, pdf_file_path):
         """PDFファイルをJPEG画像に変換します。"""
         try:
+            # キャッシュをチェック
+            if pdf_file_path in self.image_cache:
+                return self.image_cache[pdf_file_path]
+
             images = convert_from_path(
                 pdf_file_path,
                 poppler_path=self.config_manager.get('POPPLER_PATH'),
-                dpi=300
+                dpi=self.dpi,  # DPIを下げて処理を高速化
+                thread_count=4  # 並列処理を有効化
             )
             
             image_paths = []
@@ -313,8 +322,14 @@ class PDFProcessor:
                     self.config_manager.get('IMAGE_FILE_PATH'),
                     f"temp_{int(time.time() * 1000)}_{os.getpid()}_{i}.jpg"
                 )
-                image.save(image_path, "JPEG")
+                # 画像の圧縮率を上げてファイルサイズを削減
+                image.save(image_path, "JPEG", quality=85, optimize=True)
                 image_paths.append(image_path)
+            
+            # キャッシュに保存
+            if len(self.image_cache) >= self.max_cache_size:
+                self.image_cache.clear()  # キャッシュが大きすぎる場合はクリア
+            self.image_cache[pdf_file_path] = image_paths
                 
             return image_paths
             
@@ -325,19 +340,32 @@ class PDFProcessor:
     def _ocr_jpeg(self, image_path):
         """JPEG画像からテキストを抽出します。"""
         try:
+            # キャッシュをチェック
+            if image_path in self.ocr_cache:
+                return self.ocr_cache[image_path]
+
             with open(image_path, 'rb') as image_file:
                 content = image_file.read()
                 
             image = vision.Image(content=content)
-            response = self.vision_client.text_detection(image=image)
+            response = self.vision_client.text_detection(
+                image=image,
+                image_context={"language_hints": ["ja"]}  # 日本語を優先
+            )
             
             if response.error.message:
                 raise Exception(f"Google Vision APIエラー: {response.error.message}")
                 
+            result = None
             if response.text_annotations:
-                return response.text_annotations[0].description
+                result = response.text_annotations[0].description
+            
+            # キャッシュに保存
+            if len(self.ocr_cache) >= self.max_cache_size:
+                self.ocr_cache.clear()  # キャッシュが大きすぎる場合はクリア
+            self.ocr_cache[image_path] = result
                 
-            return None
+            return result
             
         except Exception as e:
             logger.error(f"OCRエラー: {e}")
@@ -448,7 +476,7 @@ class PDFRenamerApp:
         self.root = root
         self.root.title("PDF Renamer")
         self.config_manager = ConfigManager()
-        self.status_queue = queue.Queue()
+        self.status_queue = queue.Queue(maxsize=1000)  # キューサイズを制限
         self.selected_person = self.config_manager.get('DEFAULT_PERSON')
         self.business_card_mode = False
         
@@ -456,6 +484,11 @@ class PDFRenamerApp:
         self.is_processing = False
         self.processing_complete = False
         self.executor = None
+        
+        # パフォーマンス最適化のための設定
+        self.status_update_interval = 100  # ステータス更新間隔（ミリ秒）
+        self.batch_size = 5  # バッチ処理サイズ
+        self.processing_queue = queue.Queue()  # 処理キュー
         
         self._setup_ui()
         self._validate_config_on_startup()
@@ -610,7 +643,7 @@ class PDFRenamerApp:
             logger.error(f"ステータスキュー処理エラー: {e}")
         finally:
             # 処理中の場合は短い間隔で、そうでなければ長い間隔で監視
-            interval = 100 if self.is_processing else 500
+            interval = self.status_update_interval if self.is_processing else 500
             self.root.after(interval, self._poll_status_queue)
             
     def _validate_config_on_startup(self):
@@ -693,47 +726,55 @@ class PDFRenamerApp:
         completed = 0
         successful = 0
         
-        def process_single_file(pdf_file):
+        def process_batch(batch_files):
             nonlocal completed, successful
-            try:
+            results = []
+            for pdf_file in batch_files:
                 if not self.is_processing:  # 停止がリクエストされた場合
-                    return False
+                    return results
                     
-                pdf_path = os.path.join(pdf_folder, pdf_file)
-                processor = PDFProcessor(
-                    self.config_manager,
-                    self.selected_person,
-                    self.status_queue,
-                    self.business_card_mode
-                )
-                
-                if processor.process_pdf(pdf_path):
-                    successful += 1
-                    return True
+                try:
+                    pdf_path = os.path.join(pdf_folder, pdf_file)
+                    processor = PDFProcessor(
+                        self.config_manager,
+                        self.selected_person,
+                        self.status_queue,
+                        self.business_card_mode
+                    )
                     
-            except Exception as e:
-                self.status_queue.put(f"エラー: {pdf_file} - {str(e)}")
-                logger.error(f"ファイル処理エラー ({pdf_file}): {e}")
-            finally:
-                completed += 1
-                # 進捗更新
-                progress_percent = (completed / total_files) * 100
-                self.root.after(0, lambda: self._update_progress(
-                    progress_percent, completed, successful, total_files
-                ))
+                    if processor.process_pdf(pdf_path):
+                        successful += 1
+                        results.append(True)
+                    else:
+                        results.append(False)
+                        
+                except Exception as e:
+                    self.status_queue.put(f"エラー: {pdf_file} - {str(e)}")
+                    logger.error(f"ファイル処理エラー ({pdf_file}): {e}")
+                    results.append(False)
+                finally:
+                    completed += 1
+                    # 進捗更新
+                    progress_percent = (completed / total_files) * 100
+                    self.root.after(0, lambda: self._update_progress(
+                        progress_percent, completed, successful, total_files
+                    ))
             
-            return False
+            return results
         
         try:
-            # ThreadPoolExecutorを使用してファイルを並列処理
-            max_workers = min(3, len(pdf_files))  # 最大3つのワーカーに制限
+            # ファイルをバッチに分割
+            batches = [pdf_files[i:i + self.batch_size] for i in range(0, len(pdf_files), self.batch_size)]
+            
+            # ThreadPoolExecutorを使用してバッチを並列処理
+            max_workers = min(3, len(batches))  # 最大3つのワーカーに制限
             self.executor = ThreadPoolExecutor(max_workers=max_workers)
             
             futures = []
-            for pdf_file in pdf_files:
+            for batch in batches:
                 if not self.is_processing:  # 停止がリクエストされた場合
                     break
-                future = self.executor.submit(process_single_file, pdf_file)
+                future = self.executor.submit(process_batch, batch)
                 futures.append(future)
             
             # すべてのタスクの完了を待つ
