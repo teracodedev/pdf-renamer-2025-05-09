@@ -208,6 +208,7 @@ class PDFProcessor:
         self.rules = self.load_yaml_rules()
         self.openai_client = OpenAI(api_key=self.config_manager.get('OPENAI_API_KEY'))
         self.vision_client = vision.ImageAnnotatorClient()
+        self._rules_count_displayed = False  # ルール総数表示フラグを追加
         
         # パフォーマンス最適化のための設定
         self.image_cache = {}
@@ -235,8 +236,11 @@ class PDFProcessor:
         applicable_rules = []
         total_rules = len(self.rules)
         
-        self.status_queue.put(f"ルールの総数: {total_rules}個")
-        logger.info(f"ルールの総数: {total_rules}個")
+        # ルールの総数は初回のみ表示
+        if not self._rules_count_displayed:
+            self.status_queue.put(f"ルールの総数: {total_rules}個")
+            logger.info(f"ルールの総数: {total_rules}個")
+            self._rules_count_displayed = True
         
         for rule in self.rules:
             try:
@@ -244,9 +248,6 @@ class PDFProcessor:
                 if pattern:
                     if re.search(pattern, ocr_text, re.IGNORECASE):
                         applicable_rules.append(rule)
-                        rule_info = f"ルール適用: {rule.get('説明', '説明なし')} (パターン: {pattern})"
-                        self.status_queue.put(rule_info)
-                        logger.info(rule_info)
             except Exception as e:
                 error_msg = f"ルール適用エラー: {rule.get('説明', '説明なし')} - {str(e)}"
                 self.status_queue.put(error_msg)
@@ -255,6 +256,12 @@ class PDFProcessor:
         if not applicable_rules:
             self.status_queue.put("適用可能なルールが見つかりませんでした")
             logger.warning("適用可能なルールが見つかりませんでした")
+        else:
+            # 最終的に適用されたルールのみをログ出力
+            for rule in applicable_rules:
+                rule_info = f"ルール適用: {rule.get('説明', '説明なし')} (パターン: {rule.get('正規表現', '')})"
+                self.status_queue.put(rule_info)
+                logger.info(rule_info)
         
         return applicable_rules
             
