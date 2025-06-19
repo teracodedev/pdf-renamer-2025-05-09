@@ -256,12 +256,6 @@ class PDFProcessor:
         if not applicable_rules:
             self.status_queue.put("適用可能なルールが見つかりませんでした")
             logger.warning("適用可能なルールが見つかりませんでした")
-        else:
-            # 最終的に適用されたルールのみをログ出力
-            for rule in applicable_rules:
-                rule_info = f"ルール適用: {rule.get('説明', '説明なし')} (パターン: {rule.get('正規表現', '')})"
-                self.status_queue.put(rule_info)
-                logger.info(rule_info)
         
         return applicable_rules
             
@@ -290,7 +284,12 @@ class PDFProcessor:
             
             # ChatGPT-4でファイル名を生成（適用可能なルールのみを使用）
             new_name = self._generate_filename_with_gpt4(combined_ocr, pdf_file_path, applicable_rules)
-            
+
+            # 担当者が「該当者なし」の場合は（該当者なし）を除去
+            if new_name and self.selected_person == "該当者なし":
+                # 「（該当者なし）」または「(該当者なし)」を末尾から除去（全角・半角対応）
+                new_name = re.sub(r'[（(]該当者なし[）)]$', '', new_name).rstrip()
+
             # ファイル名の正規化
             new_name = self._normalize_filename(new_name)
             
@@ -397,8 +396,8 @@ class PDFProcessor:
             以下の適用可能なルールに従ってファイル名を生成してください：
             {json.dumps(applicable_rules, ensure_ascii=False, indent=2)}
             
-            ファイル名は以下の形式で出力してください：
-            {{"filename": "生成されたファイル名"}}
+            以下の形式でJSONを返してください：
+            {{"filename": "生成されたファイル名", "used_rule": "使用したルールの説明"}}
             """
             
             # ChatGPT-4にリクエスト
@@ -415,6 +414,12 @@ class PDFProcessor:
             result = response.choices[0].message.content
             try:
                 result_dict = json.loads(result)
+                # 使用されたルールを表示
+                if "used_rule" in result_dict:
+                    rule_summary = "適用されたルール:"
+                    rule_summary += f"\n- {result_dict['used_rule']}"
+                    self.status_queue.put(rule_summary)
+                    logger.info(rule_summary)
                 return result_dict.get('filename')
             except json.JSONDecodeError:
                 # JSONとして解析できない場合は、そのままのテキストを返す
