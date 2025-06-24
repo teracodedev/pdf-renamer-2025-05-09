@@ -309,17 +309,20 @@ class PDFProcessor:
             self._cleanup_temp_files(image_paths)
             
     def _pdf_to_jpeg(self, pdf_file_path):
-        """PDFファイルをJPEG画像に変換します。"""
+        """PDFファイルをJPEG画像に変換します（最初の1ページのみ）。"""
         try:
             # キャッシュをチェック
             if pdf_file_path in self.image_cache:
                 return self.image_cache[pdf_file_path]
 
+            # 最初の1ページのみ変換
             images = convert_from_path(
                 pdf_file_path,
                 poppler_path=self.config_manager.get('POPPLER_PATH'),
                 dpi=self.dpi,  # DPIを下げて処理を高速化
-                thread_count=4  # 並列処理を有効化
+                thread_count=4,  # 並列処理を有効化
+                first_page=1,
+                last_page=1
             )
             
             image_paths = []
