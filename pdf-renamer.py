@@ -98,7 +98,7 @@ class ConfigManager:
             self.config['YAML_FILE'] = os.getenv('YAML_FILE', str(DEFAULT_YAML_PATH))
             self.config['GOOGLE_APPLICATION_CREDENTIALS'] = os.getenv('GOOGLE_APPLICATION_CREDENTIALS', '')
             self.config['OPENAI_API_KEY'] = os.getenv('OPENAI_API_KEY', '')
-            self.config['POPPLER_PATH'] = os.getenv('POPPLER_PATH', self._find_poppler_path())
+            self.config['POPPLER_PATH'] = self._find_poppler_path()
             
             # AIモデル設定
             self.config['OPENAI_MODEL'] = os.getenv('OPENAI_MODEL', 'gpt-4.1')
@@ -120,25 +120,34 @@ class ConfigManager:
             raise
             
     def _find_poppler_path(self):
-        possible_paths = [
-            "C:\\Program Files\\Poppler\\bin",
-            "C:\\Program Files (x86)\\Poppler\\bin",
-            "C:\\poppler-24.08.0\\Library\\bin",
-        ]
-        
+        system = platform.system()
+        if system == "Windows":
+            possible_paths = [
+                "C:\\Program Files\\Poppler\\bin",
+                "C:\\Program Files (x86)\\Poppler\\bin",
+                "C:\\poppler-24.08.0\\Library\\bin",
+            ]
+            exe_name = "pdftoppm.exe"
+        else:
+            # Mac/Linux
+            possible_paths = [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+            ]
+            exe_name = "pdftoppm"
         for path in possible_paths:
-            if os.path.exists(path) and os.path.isfile(os.path.join(path, "pdftoppm.exe")):
+            if os.path.exists(path) and os.path.isfile(os.path.join(path, exe_name)):
                 logger.debug(f"Popplerが見つかりました: {path}")
                 return path
-        
+        # システムPATHにあるか確認
         try:
-            result = subprocess.run(["pdftoppm", "-v"], capture_output=True, text=True, check=False)
+            result = subprocess.run([exe_name, "-v"], capture_output=True, text=True, check=False)
             if result.returncode == 0:
                 logger.debug("PopplerがシステムPATHで見つかりました")
                 return ""
         except Exception:
             pass
-            
         logger.debug("Popplerのパスが見つかりませんでした")
         return ""
     
@@ -150,29 +159,32 @@ class ConfigManager:
             'GOOGLE_APPLICATION_CREDENTIALS': "Google Cloud認証情報パス",
             'OPENAI_API_KEY': "OpenAI APIキー",
         }
-        
         missing = []
         for key, desc in required_configs.items():
             if not self.config.get(key):
                 missing.append(desc)
-                
-        if not self.config.get('POPPLER_PATH'):
+        # Popplerの存在確認
+        system = platform.system()
+        poppler_path = self.config.get('POPPLER_PATH')
+        if system == "Windows":
+            exe_name = "pdftoppm.exe"
+        else:
+            exe_name = "pdftoppm"
+        if not poppler_path:
+            # システムPATHにあるか確認
             try:
-                result = subprocess.run(["pdftoppm", "-v"], capture_output=True, text=True, check=False)
+                result = subprocess.run([exe_name, "-v"], capture_output=True, text=True, check=False)
                 if result.returncode != 0:
                     missing.append("Popplerインストール（PDF変換に必要）")
             except Exception:
                 missing.append("Popplerインストール（PDF変換に必要）")
         else:
-            poppler_path = self.config['POPPLER_PATH']
-            pdftoppm_path = os.path.join(poppler_path, "pdftoppm.exe")
+            pdftoppm_path = os.path.join(poppler_path, exe_name)
             if not os.path.exists(pdftoppm_path):
                 missing.append(f"{pdftoppm_path}のPopplerの実行ファイル")
-                
         yaml_path = Path(self.config['YAML_FILE'])
         if not yaml_path.exists():
             missing.append(f"{yaml_path}のYAMLルールファイル")
-                
         return missing
     
     def get(self, key, default=None):
