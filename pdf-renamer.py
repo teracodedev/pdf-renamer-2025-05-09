@@ -965,7 +965,6 @@ class PDFRenamerApp:
             
             # ファイル保存ダイアログを表示
             file_path = filedialog.asksaveasfilename(
-                defaultextension=".env",
                 initialfile=default_filename,
                 filetypes=[("Environment files", "*.env"), ("All files", "*.*")],
                 title="環境変数ファイルの保存"
