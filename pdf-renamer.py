@@ -930,7 +930,6 @@ class PDFRenamerApp:
             
             # ファイル保存ダイアログを表示
             file_path = filedialog.asksaveasfilename(
-                defaultextension=".yaml",
                 initialfile=default_filename,
                 filetypes=[("YAML files", "*.yaml"), ("All files", "*.*")],
                 title="ルールファイルの保存"
