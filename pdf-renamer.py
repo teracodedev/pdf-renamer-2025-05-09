@@ -1,12 +1,12 @@
 """
 PDF Renamer - OCR、Google Cloud Vision、およびOpenAIを使用してPDFファイルを
-内容に基づいて自動的にリネームするための強化ツール（フリーズ問題修正版）
+内容に基づいて自動的にリネームするための強化ツール（パフォーマンス最適化版）
 
 このアプリケーションはOCRを使用してPDFからテキストを抽出し、AIで内容を分析し、
 カスタマイズ可能なルールに従って意味のあるファイル名を生成します。
 
 作者: Claude（ユーザーのオリジナルに基づく）
-日付: 2025年6月4日（フリーズ問題修正版）
+日付: 2025年6月4日（パフォーマンス最適化版）
 """
 
 import os
@@ -30,7 +30,6 @@ import openai
 from pdf2image import convert_from_path
 from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError
 from google.cloud import vision
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import google.api_core.exceptions
 from openai import OpenAI
 import pytesseract
@@ -50,7 +49,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = SCRIPT_DIR / '.env'
 DEFAULT_YAML_PATH = SCRIPT_DIR / 'rename_rules.yaml'
 DEFAULT_IMAGE_PATH = SCRIPT_DIR / 'temp_images'
-APP_VERSION = "2025年6月4日バージョン（フリーズ問題修正版）"
+APP_VERSION = "2025年6月4日バージョン（パフォーマンス最適化版）"
 
 # ログの設定
 log_file_path = os.path.join(SCRIPT_DIR, "pdf-renamer.log")
@@ -61,7 +60,7 @@ for handler in logging.root.handlers[:]:
 
 # ログの基本設定
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,  # DEBUGからINFOに変更
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),
@@ -70,7 +69,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)  # DEBUGからINFOに変更
 
 # 初期化ログの出力
 logger.debug("=" * 50)
@@ -101,8 +100,8 @@ class ConfigManager:
             self.config['POPPLER_PATH'] = self._find_poppler_path()
             
             # AIモデル設定
-            self.config['OPENAI_MODEL'] = os.getenv('OPENAI_MODEL', 'gpt-4.1')
-            self.config['OPENAI_TEMPERATURE'] = float(os.getenv('OPENAI_TEMPERATURE', '0.2'))
+            self.config['OPENAI_MODEL'] = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+            self.config['OPENAI_TEMPERATURE'] = float(os.getenv('OPENAI_TEMPERATURE', '0.0'))
             
             # オプション設定
             self.config['PERSONS'] = os.getenv('PERSONS', '').split(',')
@@ -226,7 +225,7 @@ class PDFProcessor:
         self.image_cache = {}
         self.ocr_cache = {}
         self.max_cache_size = 100  # キャッシュサイズの制限
-        self.dpi = 200  # DPIを300から200に下げて処理を高速化
+        self.dpi = 150  # DPIを200から150に下げて処理を高速化
         
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
@@ -274,51 +273,73 @@ class PDFProcessor:
     def process_pdf(self, pdf_file_path):
         """PDFファイルを処理し、新しいファイル名を生成します。"""
         image_paths = []
+        start_time = time.time()
+        logger.info("\n==============================")
+        logger.info(f"[START] PDF処理: {os.path.basename(pdf_file_path)} (開始時刻: {time.strftime('%H:%M:%S')})")
         try:
             # PDFを画像に変換
+            pdf_start = time.time()
             image_paths = self._pdf_to_jpeg(pdf_file_path)
+            pdf_time = time.time() - pdf_start
+            logger.info(f"PDF→画像変換完了: {pdf_time:.2f}秒")
             if not image_paths:
                 raise Exception("PDFの画像変換に失敗しました")
-                
-            # OCR処理を並列化
-            with ThreadPoolExecutor(max_workers=min(4, len(image_paths))) as executor:
-                ocr_futures = [executor.submit(self._ocr_jpeg, path) for path in image_paths]
-                ocr_results = [future.result() for future in as_completed(ocr_futures)]
-                    
-            if not any(ocr_results):
+            # OCR処理を順次実行
+            ocr_start = time.time()
+            ocr_results = []
+            for i, path in enumerate(image_paths):
+                logger.info(f"OCR処理開始 ({i+1}/{len(image_paths)}): {os.path.basename(path)}")
+                step_start = time.time()
+                result = self._ocr_jpeg(path)
+                step_time = time.time() - step_start
+                if result:
+                    ocr_results.append(result)
+                    logger.info(f"OCR処理成功 ({i+1}/{len(image_paths)}) ({step_time:.2f}秒)")
+                else:
+                    logger.warning(f"OCR処理失敗 ({i+1}/{len(image_paths)}) ({step_time:.2f}秒)")
+            ocr_time = time.time() - ocr_start
+            logger.info(f"OCR処理完了: {ocr_time:.2f}秒")
+            if not ocr_results:
                 raise Exception("OCR処理に失敗しました")
-                
             # OCR結果を結合
             combined_ocr = "\n".join(filter(None, ocr_results))
-            
+            logger.info(f"OCR結果文字数: {len(combined_ocr)}文字")
             # 適用可能なルールを確認
+            rules_start = time.time()
             applicable_rules = self._check_applicable_rules(combined_ocr)
-            
-            # ChatGPT-4でファイル名を生成（適用可能なルールのみを使用）
+            rules_time = time.time() - rules_start
+            logger.info(f"ルール適用完了: {rules_time:.2f}秒 (適用ルール数: {len(applicable_rules)})")
+            # ChatGPT-4でファイル名を生成
+            ai_start = time.time()
             new_name = self._generate_filename_with_gpt4(combined_ocr, pdf_file_path, applicable_rules)
-
+            ai_time = time.time() - ai_start
+            logger.info(f"AI処理完了: {ai_time:.2f}秒")
             # 担当者が「該当者なし」の場合は（該当者なし）を除去
             if new_name and self.selected_person == "該当者なし":
-                # 「（該当者なし）」または「(該当者なし)」を末尾から除去（全角・半角対応）
                 new_name = re.sub(r'[（(]該当者なし[）)]$', '', new_name).rstrip()
-
             # ファイル名の正規化
             new_name = self._normalize_filename(new_name)
-            
             # ファイルのリネーム
             if new_name:
+                rename_start = time.time()
                 self._rename_pdf(pdf_file_path, new_name)
+                rename_time = time.time() - rename_start
+                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒")
                 return True
-                
             return False
-            
         except Exception as e:
-            logger.error(f"PDF処理エラー ({pdf_file_path}): {e}")
+            total_time = time.time() - start_time
+            logger.error(f"PDF処理エラー ({pdf_file_path}): {e} (総処理時間: {total_time:.2f}秒)")
             self.status_queue.put(f"エラー: {os.path.basename(pdf_file_path)} - {str(e)}")
             return False
         finally:
-            # 一時ファイルの削除
+            cleanup_start = time.time()
             self._cleanup_temp_files(image_paths)
+            cleanup_time = time.time() - cleanup_start
+            logger.info(f"一時ファイル削除完了: {cleanup_time:.2f}秒")
+            total_time = time.time() - start_time
+            logger.info(f"[END] PDF処理: {os.path.basename(pdf_file_path)} (終了時刻: {time.strftime('%H:%M:%S')}) (総処理時間: {total_time:.2f}秒)")
+            logger.info("==============================\n")
             
     def _pdf_to_jpeg(self, pdf_file_path):
         """PDFファイルをJPEG画像に変換します（最初の1ページのみ）。"""
@@ -332,7 +353,7 @@ class PDFProcessor:
                 pdf_file_path,
                 poppler_path=self.config_manager.get('POPPLER_PATH'),
                 dpi=self.dpi,  # DPIを下げて処理を高速化
-                thread_count=4,  # 並列処理を有効化
+                thread_count=1,  # 並列処理を無効化（安定性重視）
                 first_page=1,
                 last_page=1
             )
@@ -344,7 +365,7 @@ class PDFProcessor:
                     f"temp_{int(time.time() * 1000)}_{os.getpid()}_{i}.jpg"
                 )
                 # 画像の圧縮率を上げてファイルサイズを削減
-                image.save(image_path, "JPEG", quality=85, optimize=True)
+                image.save(image_path, "JPEG", quality=70, optimize=True)
                 image_paths.append(image_path)
             
             # キャッシュに保存
@@ -360,16 +381,20 @@ class PDFProcessor:
             
     def _ocr_jpeg(self, image_path):
         """JPEG画像からテキストを抽出します。"""
+        start_time = time.time()
         try:
             # キャッシュをチェック
             if image_path in self.ocr_cache:
+                logger.info(f"OCRキャッシュヒット: {os.path.basename(image_path)}")
                 return self.ocr_cache[image_path]
 
+            logger.info(f"Google Vision API呼び出し開始: {os.path.basename(image_path)}")
             with open(image_path, 'rb') as image_file:
                 content = image_file.read()
                 
             image = vision.Image(content=content)
-            response = self.vision_client.text_detection(
+            vision_client = vision.ImageAnnotatorClient()  # ←毎回新規生成
+            response = vision_client.text_detection(
                 image=image,
                 image_context={"language_hints": ["ja"]}  # 日本語を優先
             )
@@ -385,16 +410,22 @@ class PDFProcessor:
             if len(self.ocr_cache) >= self.max_cache_size:
                 self.ocr_cache.clear()  # キャッシュが大きすぎる場合はクリア
             self.ocr_cache[image_path] = result
-                
+            
+            ocr_time = time.time() - start_time
+            logger.info(f"OCR処理完了: {os.path.basename(image_path)} ({ocr_time:.2f}秒)")
             return result
             
         except Exception as e:
-            logger.error(f"OCRエラー: {e}")
+            ocr_time = time.time() - start_time
+            logger.error(f"OCRエラー: {e} ({ocr_time:.2f}秒)")
             return None
             
     def _generate_filename_with_gpt4(self, ocr_text, pdf_file_path, applicable_rules):
         """ChatGPT-4を使用してファイル名を生成します。"""
+        start_time = time.time()
         try:
+            logger.info(f"OpenAI API呼び出し開始: {os.path.basename(pdf_file_path)}")
+            
             # 現在の日付を取得
             current_date = datetime.now().strftime("%Y年%m月%d日")
             
@@ -441,8 +472,12 @@ class PDFProcessor:
                 return result.strip()
                 
         except Exception as e:
-            logger.error(f"ChatGPT-4 APIエラー: {e}")
+            ai_time = time.time() - start_time
+            logger.error(f"ChatGPT-4 APIエラー: {e} ({ai_time:.2f}秒)")
             return None
+        finally:
+            ai_time = time.time() - start_time
+            logger.info(f"OpenAI API処理完了: {os.path.basename(pdf_file_path)} ({ai_time:.2f}秒)")
             
     def _normalize_filename(self, filename):
         """ファイル名を正規化します。"""
@@ -467,21 +502,16 @@ class PDFProcessor:
             # 拡張子を保持
             ext = os.path.splitext(pdf_file_path)[1]
             new_path = os.path.join(os.path.dirname(pdf_file_path), f"{new_name}{ext}")
-            
-            # 同名ファイルが存在する場合は番号を付加
-            counter = 1
-            while os.path.exists(new_path):
-                new_path = os.path.join(
-                    os.path.dirname(pdf_file_path),
-                    f"{new_name}_{counter}{ext}"
-                )
-                counter += 1
-                
+
+            # 既存ファイルがあれば削除して上書き
+            if os.path.exists(new_path):
+                os.remove(new_path)
+
             # ファイルの移動
             shutil.move(pdf_file_path, new_path)
             logger.info(f"ファイルをリネームしました: {os.path.basename(pdf_file_path)} -> {os.path.basename(new_path)}")
             self.status_queue.put(f"リネーム成功: {os.path.basename(new_path)}")
-            
+
         except Exception as e:
             logger.error(f"ファイルリネームエラー: {e}")
             self.status_queue.put(f"リネームエラー: {os.path.basename(pdf_file_path)} - {str(e)}")
@@ -492,9 +522,16 @@ class PDFProcessor:
             try:
                 if path and os.path.exists(path):
                     os.remove(path)
-                    logger.debug(f"一時ファイルを削除しました: {path}")
             except Exception as e:
                 logger.error(f"一時ファイル削除エラー: {e}")
+        # temp_imagesディレクトリ内の残骸も削除
+        temp_dir = self.config_manager.get('IMAGE_FILE_PATH')
+        for file in os.listdir(temp_dir):
+            if file.startswith('temp_') and file.endswith('.jpg'):
+                try:
+                    os.remove(os.path.join(temp_dir, file))
+                except Exception as e:
+                    logger.error(f"一時ファイル削除エラー: {e}")
 
 class PDFRenamerApp:
     """PDFリネーマーのGUIアプリケーション。"""
@@ -510,11 +547,9 @@ class PDFRenamerApp:
         # 処理状態の管理
         self.is_processing = False
         self.processing_complete = False
-        self.executor = None
         
         # パフォーマンス最適化のための設定
-        self.status_update_interval = 100  # ステータス更新間隔（ミリ秒）
-        self.batch_size = 5  # バッチ処理サイズ
+        self.status_update_interval = 50  # ステータス更新間隔（ミリ秒）を短縮
         self.processing_queue = queue.Queue()  # 処理キュー
         
         self._setup_ui()
@@ -722,6 +757,9 @@ class PDFRenamerApp:
             logger.debug("=" * 50)
 
             pdf_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.pdf')]
+            logger.info(f"フォルダ内の全ファイル: {os.listdir(folder_path)}")
+            logger.info(f"検出されたPDFファイル: {pdf_files}")
+            
             if not pdf_files:
                 messagebox.showinfo("情報", "PDFファイルが見つかりません")
                 return
@@ -733,6 +771,9 @@ class PDFRenamerApp:
             
     def _start_processing(self, pdf_folder, pdf_files):
         """PDFファイルの処理を開始します。"""
+        logger.info(f"処理開始: フォルダ={pdf_folder}, ファイル数={len(pdf_files)}")
+        logger.info(f"検出されたPDFファイル: {pdf_files}")
+        
         self.is_processing = True
         self.processing_complete = False
         self.start_button.config(text="処理を停止", state="normal")
@@ -746,6 +787,7 @@ class PDFRenamerApp:
             daemon=True
         )
         thread.start()
+        logger.info("バックグラウンドスレッドを開始しました")
         
     def _process_pdf_files(self, pdf_folder, pdf_files):
         """PDFファイルの処理を実行します。"""
@@ -753,32 +795,48 @@ class PDFRenamerApp:
         completed = 0
         successful = 0
         
-        def process_batch(batch_files):
-            nonlocal completed, successful
-            results = []
-            for pdf_file in batch_files:
+        logger.info(f"PDFファイル処理開始: 合計{total_files}個のファイル")
+        logger.info(f"処理対象ファイル: {pdf_files}")
+        
+        # 単一のPDFProcessorインスタンスを作成（全ファイルで共有）
+        processor = PDFProcessor(
+            self.config_manager,
+            self.selected_person,
+            self.status_queue,
+            self.business_card_mode
+        )
+        
+        try:
+            # ファイルを順次処理（並列処理によるAPI制限を回避）
+            for i, pdf_file in enumerate(pdf_files):
                 if not self.is_processing:  # 停止がリクエストされた場合
-                    return results
+                    logger.info("処理停止がリクエストされました")
+                    break
                     
                 try:
+                    logger.info(f"ファイル処理開始 ({i+1}/{total_files}): {pdf_file}")
                     pdf_path = os.path.join(pdf_folder, pdf_file)
-                    processor = PDFProcessor(
-                        self.config_manager,
-                        self.selected_person,
-                        self.status_queue,
-                        self.business_card_mode
-                    )
                     
+                    # ファイルの存在確認
+                    if not os.path.exists(pdf_path):
+                        logger.error(f"ファイルが存在しません: {pdf_path}")
+                        self.status_queue.put(f"エラー: {pdf_file} - ファイルが存在しません")
+                        continue
+                    
+                    # PDF処理を実行（タイムアウト付き）
+                    start_time = time.time()
                     if processor.process_pdf(pdf_path):
                         successful += 1
-                        results.append(True)
+                        processing_time = time.time() - start_time
+                        logger.info(f"ファイル処理成功: {pdf_file} (処理時間: {processing_time:.2f}秒)")
                     else:
-                        results.append(False)
+                        processing_time = time.time() - start_time
+                        logger.warning(f"ファイル処理失敗: {pdf_file} (処理時間: {processing_time:.2f}秒)")
                         
                 except Exception as e:
+                    processing_time = time.time() - start_time if 'start_time' in locals() else 0
                     self.status_queue.put(f"エラー: {pdf_file} - {str(e)}")
-                    logger.error(f"ファイル処理エラー ({pdf_file}): {e}")
-                    results.append(False)
+                    logger.error(f"ファイル処理エラー ({pdf_file}): {e} (処理時間: {processing_time:.2f}秒)")
                 finally:
                     completed += 1
                     # 進捗更新
@@ -786,44 +844,15 @@ class PDFRenamerApp:
                     self.root.after(0, lambda: self._update_progress(
                         progress_percent, completed, successful, total_files
                     ))
-            
-            return results
-        
-        try:
-            # ファイルをバッチに分割
-            batches = [pdf_files[i:i + self.batch_size] for i in range(0, len(pdf_files), self.batch_size)]
-            
-            # ThreadPoolExecutorを使用してバッチを並列処理
-            max_workers = min(3, len(batches))  # 最大3つのワーカーに制限
-            self.executor = ThreadPoolExecutor(max_workers=max_workers)
-            
-            futures = []
-            for batch in batches:
-                if not self.is_processing:  # 停止がリクエストされた場合
-                    break
-                future = self.executor.submit(process_batch, batch)
-                futures.append(future)
-            
-            # すべてのタスクの完了を待つ
-            for future in as_completed(futures):
-                if not self.is_processing:  # 停止がリクエストされた場合
-                    break
-                try:
-                    future.result(timeout=300)  # 5分のタイムアウト
-                except Exception as e:
-                    logger.error(f"Future処理エラー: {e}")
                     
         except Exception as e:
             logger.error(f"処理全体のエラー: {e}")
             self.status_queue.put(f"処理エラー: {str(e)}")
         finally:
-            # リソースのクリーンアップ
-            if self.executor:
-                self.executor.shutdown(wait=False)  # 即座にシャットダウン
-                self.executor = None
-                
             # メモリクリーンアップ
             gc.collect()
+            
+            logger.info(f"全処理完了: {successful}/{total_files} ファイルが成功")
             
             # UI更新をメインスレッドで実行
             self.root.after(0, lambda: self._processing_completed(successful, total_files))
@@ -833,11 +862,6 @@ class PDFRenamerApp:
         self.is_processing = False
         self._add_to_status("処理停止がリクエストされました...")
         
-        # ExecutorPoolを強制終了
-        if self.executor:
-            self.executor.shutdown(wait=False)
-            self.executor = None
-            
         self.start_button.config(text="リネーム開始", state="normal")
         self._add_to_status("処理が停止されました")
         
@@ -900,7 +924,7 @@ class PDFRenamerApp:
             f"PDF Renamer {APP_VERSION}\n\n"
             "OCR、Google Cloud Vision、およびOpenAIを使用して\n"
             "PDFファイルを内容に基づいて自動的にリネームするツール\n\n"
-            "フリーズ問題修正版"
+            "パフォーマンス最適化版"
         )
         
     def _show_help(self):
@@ -919,10 +943,12 @@ class PDFRenamerApp:
 - エラーが発生した場合はログに記録されます
 - 処理中に「処理を停止」ボタンで中断できます
 
-修正点（フリーズ問題対策）:
-- 適切なリソース管理とクリーンアップ
-- ThreadPoolExecutorの適切な終了処理
-- メモリリークの防止
+修正点（パフォーマンス最適化版）:
+- DPIを150に下げてPDF→画像変換を高速化
+- 画像保存のqualityを70に下げてファイルサイズ削減
+- 順次処理による安定性向上（API制限回避）
+- PDFProcessorインスタンスの共有
+- 詳細なログ出力によるデバッグ機能
 - UI応答性の改善
         """
         messagebox.showinfo("使い方", help_text)
@@ -1019,11 +1045,6 @@ class PDFRenamerApp:
                 self._stop_processing()
                 # 少し待つ
                 time.sleep(1)
-            
-            # ExecutorPoolを確実に終了
-            if self.executor:
-                self.executor.shutdown(wait=False)
-                self.executor = None
             
             # 一時ファイルのクリーンアップ
             temp_dir = self.config_manager.get('IMAGE_FILE_PATH')
