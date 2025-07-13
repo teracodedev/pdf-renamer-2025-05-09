@@ -740,6 +740,14 @@ class PDFRenamerApp:
         # ステータス表示エリアの拡張設定
         main_frame.rowconfigure(5, weight=1)
         
+        # 終了ボタン
+        self.exit_button = ttk.Button(
+            main_frame,
+            text="終了",
+            command=self._exit_app
+        )
+        self.exit_button.grid(row=6, column=0, columnspan=3, pady=5)
+        
         # メニューの作成
         self._create_menu()
         
@@ -1293,6 +1301,37 @@ class PDFRenamerApp:
                 logger.info("ボタン状態は正常です")
         except Exception as e:
             logger.error(f"ボタン状態確認エラー: {e}")
+    
+    def _exit_app(self):
+        """アプリケーションを終了します（確認なし）。"""
+        try:
+            # 処理中の場合は停止
+            if self.is_processing:
+                self._stop_processing()
+                # 少し待つ
+                time.sleep(0.5)
+            
+            # 一時ファイルのクリーンアップ
+            temp_dir = self.config_manager.get('IMAGE_FILE_PATH')
+            if os.path.exists(temp_dir):
+                try:
+                    for file in os.listdir(temp_dir):
+                        if file.startswith('temp_') and file.endswith('.jpg'):
+                            os.remove(os.path.join(temp_dir, file))
+                except Exception as e:
+                    logger.error(f"一時ファイルクリーンアップエラー: {e}")
+            
+            # ログの最終出力
+            logger.info("アプリケーションを終了します（終了ボタンから）")
+            
+            # ウィンドウを破棄
+            self.root.quit()
+            self.root.destroy()
+            
+        except Exception as e:
+            logger.error(f"終了処理エラー: {e}")
+            # 強制終了
+            self.root.quit()
 
 def main():
     """メイン関数"""
