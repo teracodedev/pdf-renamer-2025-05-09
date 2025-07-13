@@ -276,10 +276,19 @@ class PDFProcessor:
         start_time = time.time()
         logger.info("\n==============================")
         logger.info(f"[START] PDF処理: {os.path.basename(pdf_file_path)} (開始時刻: {time.strftime('%H:%M:%S')})")
+        temp_dir = None
+        temp_pdf_path = None
         try:
+            # 一時ディレクトリにPDFをコピーして作業
+            temp_dir = tempfile.mkdtemp()
+            temp_pdf_path = os.path.join(temp_dir, os.path.basename(pdf_file_path))
+            shutil.copy2(pdf_file_path, temp_pdf_path)
+            work_pdf_path = temp_pdf_path
+            logger.info(f"PDFを一時ディレクトリにコピーして作業します: {work_pdf_path}")
+
             # PDFを画像に変換
             pdf_start = time.time()
-            image_paths = self._pdf_to_jpeg(pdf_file_path)
+            image_paths = self._pdf_to_jpeg(work_pdf_path)
             pdf_time = time.time() - pdf_start
             logger.info(f"PDF→画像変換完了: {pdf_time:.2f}秒")
             if not image_paths:
@@ -311,7 +320,7 @@ class PDFProcessor:
             logger.info(f"ルール適用完了: {rules_time:.2f}秒 (適用ルール数: {len(applicable_rules)})")
             # ChatGPT-4でファイル名を生成
             ai_start = time.time()
-            new_name = self._generate_filename_with_gpt4(combined_ocr, pdf_file_path, applicable_rules)
+            new_name = self._generate_filename_with_gpt4(combined_ocr, work_pdf_path, applicable_rules)
             ai_time = time.time() - ai_start
             logger.info(f"AI処理完了: {ai_time:.2f}秒")
             # 担当者が「該当者なし」の場合は（該当者なし）を除去
@@ -322,10 +331,37 @@ class PDFProcessor:
             # ファイルのリネーム
             if new_name:
                 rename_start = time.time()
-                self._rename_pdf(pdf_file_path, new_name)
+                rename_success = self._rename_pdf(work_pdf_path, new_name)
                 rename_time = time.time() - rename_start
-                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒")
-                return True
+                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: {rename_success})")
+                if rename_success:
+                    # 元のディレクトリに移動
+                    ext = os.path.splitext(pdf_file_path)[1]
+                    new_final_path = os.path.join(os.path.dirname(pdf_file_path), f"{new_name}{ext}")
+                    logger.info(f"リネーム後のファイルを元の場所に移動: {new_final_path}")
+                    
+                    # リネーム前とリネーム後のファイル名が同じ場合はスキップ
+                    if os.path.basename(pdf_file_path) == f"{new_name}{ext}":
+                        logger.info(f"ファイル名が同じなので移動処理をスキップ: {os.path.basename(pdf_file_path)}")
+                        return True
+                    
+                    # 既存ファイルがあれば削除
+                    if os.path.exists(new_final_path):
+                        try:
+                            os.remove(new_final_path)
+                        except OSError as e:
+                            logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
+                    
+                    # 一時ファイルを元の場所に移動
+                    temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
+                    if os.path.exists(temp_file_path):
+                        shutil.move(temp_file_path, new_final_path)
+                    else:
+                        logger.warning(f"一時ファイルが見つかりません: {temp_file_path}")
+                    
+                    return True
+                else:
+                    return False
             return False
         except Exception as e:
             total_time = time.time() - start_time
@@ -335,6 +371,11 @@ class PDFProcessor:
         finally:
             cleanup_start = time.time()
             self._cleanup_temp_files(image_paths)
+            if temp_dir and os.path.exists(temp_dir):
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as e:
+                    logger.error(f"一時ディレクトリ削除エラー: {e}")
             cleanup_time = time.time() - cleanup_start
             logger.info(f"一時ファイル削除完了: {cleanup_time:.2f}秒")
             total_time = time.time() - start_time
@@ -497,24 +538,55 @@ class PDFProcessor:
         return filename
         
     def _rename_pdf(self, pdf_file_path, new_name):
-        """PDFファイルをリネームします。"""
-        try:
-            # 拡張子を保持
-            ext = os.path.splitext(pdf_file_path)[1]
-            new_path = os.path.join(os.path.dirname(pdf_file_path), f"{new_name}{ext}")
-
-            # 既存ファイルがあれば削除して上書き
-            if os.path.exists(new_path):
-                os.remove(new_path)
-
-            # ファイルの移動
-            shutil.move(pdf_file_path, new_path)
-            logger.info(f"ファイルをリネームしました: {os.path.basename(pdf_file_path)} -> {os.path.basename(new_path)}")
-            self.status_queue.put(f"リネーム成功: {os.path.basename(new_path)}")
-
-        except Exception as e:
-            logger.error(f"ファイルリネームエラー: {e}")
-            self.status_queue.put(f"リネームエラー: {os.path.basename(pdf_file_path)} - {str(e)}")
+        """PDFファイルをリネームします（バックグラウンドスレッドで実行）。"""
+        result = {'success': False}
+        def do_rename():
+            try:
+                # ファイルの存在確認
+                if not os.path.exists(pdf_file_path):
+                    error_msg = f"元ファイルが存在しません: {pdf_file_path}"
+                    logger.error(error_msg)
+                    self.status_queue.put(error_msg)
+                    result['success'] = False
+                    return
+                # 拡張子を保持
+                ext = os.path.splitext(pdf_file_path)[1]
+                new_path = os.path.join(os.path.dirname(pdf_file_path), f"{new_name}{ext}")
+                logger.info(f"リネーム処理開始: {os.path.basename(pdf_file_path)} -> {os.path.basename(new_path)}")
+                logger.info(f"元ファイルパス: {pdf_file_path}")
+                logger.info(f"新ファイルパス: {new_path}")
+                
+                # リネーム前とリネーム後のファイル名が同じ場合はスキップ
+                if pdf_file_path == new_path:
+                    logger.info(f"ファイル名が同じなのでリネーム処理をスキップ: {os.path.basename(pdf_file_path)}")
+                    self.status_queue.put(f"リネームスキップ: {os.path.basename(pdf_file_path)} (ファイル名変更なし)")
+                    result['success'] = True
+                    return
+                
+                # 既存ファイルがあれば削除して上書き
+                if os.path.exists(new_path):
+                    logger.info(f"既存ファイルを削除します: {new_path}")
+                    try:
+                        os.remove(new_path)
+                    except OSError as e:
+                        logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
+                        # 削除に失敗しても続行（ファイルが存在しない場合など）
+                
+                # ファイルの移動
+                shutil.move(pdf_file_path, new_path)
+                logger.info(f"ファイルをリネームしました: {os.path.basename(pdf_file_path)} -> {os.path.basename(new_path)}")
+                self.status_queue.put(f"リネーム成功: {os.path.basename(new_path)}")
+                result['success'] = True
+            except Exception as e:
+                logger.error(f"ファイルリネームエラー: {e}")
+                logger.error(f"元ファイルパス: {pdf_file_path}")
+                logger.error(f"新ファイルパス: {new_path if 'new_path' in locals() else '未定義'}")
+                self.status_queue.put(f"リネームエラー: {os.path.basename(pdf_file_path)} - {str(e)}")
+                result['success'] = False
+        t = threading.Thread(target=do_rename)
+        t.start()
+        t.join()  # 呼び出し元で同期的に待つ（process_pdfの流れを変えないため）
+        return result['success']
             
     def _cleanup_temp_files(self, file_paths):
         """一時ファイルを削除します。"""
@@ -700,6 +772,29 @@ class PDFRenamerApp:
                     self.status_text.insert(tk.END, f"[{timestamp}] {message}\n")
                 self.status_text.see(tk.END)
                 self.root.update_idletasks()
+            
+            # 処理完了の検知とUI更新
+            if not self.is_processing and self.processing_complete:
+                logger.info("_poll_status_queueで処理完了を検知しました")
+                try:
+                    # ボタンを確実に「リネーム開始」に戻す
+                    self._set_start_button_to_ready()
+                    logger.info("_poll_status_queueでボタンを更新しました")
+                    
+                    # 完了メッセージを表示
+                    self._add_to_status("処理が完了しました")
+                    
+                    # 完了ダイアログを表示
+                    try:
+                        messagebox.showinfo("処理完了", "処理が完了しました")
+                    except Exception as dialog_error:
+                        logger.error(f"ダイアログ表示エラー: {dialog_error}")
+                    
+                    # 処理完了フラグをリセット
+                    self.processing_complete = False
+                    
+                except Exception as e:
+                    logger.error(f"_poll_status_queueでのUI更新エラー: {e}")
                 
         except Exception as e:
             logger.error(f"ステータスキュー処理エラー: {e}")
@@ -770,14 +865,10 @@ class PDFRenamerApp:
             messagebox.showerror("エラー", str(e))
             
     def _start_processing(self, pdf_folder, pdf_files):
-        """PDFファイルの処理を開始します。"""
-        logger.info(f"処理開始: フォルダ={pdf_folder}, ファイル数={len(pdf_files)}")
-        logger.info(f"検出されたPDFファイル: {pdf_files}")
-        
+        logger.info("ボタンを「処理を停止」に設定します（_start_processing）")
         self.is_processing = True
         self.processing_complete = False
-        self.start_button.config(text="処理を停止", state="normal")
-        
+        self._set_start_button_to_stop()
         self._add_to_status(f"処理開始: {len(pdf_files)}個のファイルを処理します")
         
         # バックグラウンドスレッドで処理を実行
@@ -817,8 +908,12 @@ class PDFRenamerApp:
                     logger.info(f"ファイル処理開始 ({i+1}/{total_files}): {pdf_file}")
                     pdf_path = os.path.join(pdf_folder, pdf_file)
                     
-                    # ファイルの存在確認
-                    if not os.path.exists(pdf_path):
+                    # ファイルの存在確認と詳細ログ
+                    logger.info(f"処理対象ファイルパス: {pdf_path}")
+                    if os.path.exists(pdf_path):
+                        file_size = os.path.getsize(pdf_path)
+                        logger.info(f"ファイル存在確認: サイズ={file_size}バイト")
+                    else:
                         logger.error(f"ファイルが存在しません: {pdf_path}")
                         self.status_queue.put(f"エラー: {pdf_file} - ファイルが存在しません")
                         continue
@@ -854,16 +949,54 @@ class PDFRenamerApp:
             
             logger.info(f"全処理完了: {successful}/{total_files} ファイルが成功")
             
-            # UI更新をメインスレッドで実行
-            self.root.after(0, lambda: self._processing_completed(successful, total_files))
+            # 処理状態をリセット（エラーが発生しても確実に実行）
+            self.is_processing = False
+            self.processing_complete = True  # 処理完了フラグを設定
+            logger.info("is_processingをFalseに設定しました")
+            logger.info("processing_completeをTrueに設定しました")
+            
+            # UI更新をメインスレッドで実行（複数の方法で確実に実行）
+            logger.info("_processing_completedメソッドを呼び出す準備をしています...")
+            
+            # 方法1: afterでスケジュール
+            try:
+                self.root.after(0, self._processing_completed, successful, total_files)
+                logger.info("_processing_completedメソッドの呼び出しをスケジュールしました")
+            except Exception as e:
+                logger.error(f"_processing_completedメソッドのスケジュールエラー: {e}")
+                
+                # 方法2: 直接呼び出し
+                try:
+                    self._processing_completed(successful, total_files)
+                    logger.info("_processing_completedメソッドを直接呼び出しました")
+                except Exception as direct_error:
+                    logger.error(f"_processing_completedメソッドの直接呼び出しエラー: {direct_error}")
+                    
+                    # 方法3: 最後の手段としてボタンのみ更新
+                    try:
+                        self._set_start_button_to_ready()
+                        logger.info("最終手段としてボタンのみ更新しました")
+                    except Exception as final_error:
+                        logger.error(f"最終手段のボタン更新エラー: {final_error}")
+            
+            # 追加のUI更新を強制実行
+            try:
+                self.root.update_idletasks()
+                logger.info("処理完了後の追加UI更新を実行しました")
+            except Exception as update_error:
+                logger.error(f"追加UI更新エラー: {update_error}")
         
     def _stop_processing(self):
         """処理を停止します。"""
-        self.is_processing = False
-        self._add_to_status("処理停止がリクエストされました...")
-        
-        self.start_button.config(text="リネーム開始", state="normal")
-        self._add_to_status("処理が停止されました")
+        try:
+            self.is_processing = False
+            self._add_to_status("処理停止がリクエストされました...")
+            self._set_start_button_to_ready()
+            self._add_to_status("処理が停止されました")
+        except Exception as e:
+            logger.error(f"処理停止エラー: {e}")
+            self.is_processing = False
+            self._set_start_button_to_ready()
         
     def _update_progress(self, value, completed, successful, total):
         """進捗状況を更新します。"""
@@ -878,29 +1011,51 @@ class PDFRenamerApp:
             logger.error(f"進捗更新エラー: {e}")
         
     def _processing_completed(self, successful, total):
-        """処理完了時の処理を行います。"""
+        print("DEBUG: _processing_completed called")
+        logger.info(f"_processing_completedメソッドが呼び出されました: 成功={successful}, 総数={total}")
         try:
             self.is_processing = False
             self.processing_complete = True
+            logger.info("処理完了フラグを設定しました")
             
-            # UIの更新
-            self.start_button.config(text="リネーム開始", state="normal")
-            self.progress_var.set(100)
+            # UIの更新（確実に実行）
+            try:
+                self.progress_var.set(100)
+                logger.info("進捗バーを100%に設定しました")
+            except Exception as ui_error:
+                logger.error(f"UI更新エラー: {ui_error}")
             
             # 完了メッセージ
             self._add_to_status(f"処理完了: {successful}/{total} ファイルが正常に処理されました")
             
             # 完了ダイアログを表示
-            messagebox.showinfo(
-                "処理完了",
-                f"処理が完了しました\n成功: {successful}/{total}"
-            )
+            try:
+                messagebox.showinfo(
+                    "処理完了",
+                    f"処理が完了しました\n成功: {successful}/{total}"
+                )
+            except Exception as dialog_error:
+                logger.error(f"ダイアログ表示エラー: {dialog_error}")
             
             # リセット処理
             self._reset_after_processing()
             
+            # ボタンを確実に「リネーム開始」に戻す
+            print("DEBUG: calling _set_start_button_to_ready (final)")
+            self._set_start_button_to_ready()
+            
+            # UIの強制更新
+            try:
+                self.root.update()
+                logger.info("UIの強制更新を実行しました")
+            except Exception as update_error:
+                logger.error(f"UI強制更新エラー: {update_error}")
+                
         except Exception as e:
+            print(f"DEBUG: _processing_completed error: {e}")
             logger.error(f"処理完了処理エラー: {e}")
+            # エラーが発生してもボタンを戻す
+            self._set_start_button_to_ready()
             
     def _reset_after_processing(self):
         """処理完了後のリセットを行います。"""
@@ -1066,6 +1221,46 @@ class PDFRenamerApp:
             logger.error(f"終了処理エラー: {e}")
             # 強制終了
             self.root.quit()
+
+    def _set_start_button_to_ready(self):
+        print("DEBUG: _set_start_button_to_ready called")
+        def _set():
+            print("DEBUG: _set_start_button_to_ready _set() called")
+            try:
+                logger.info(f"UIスレッドでボタンを「リネーム開始」にリセット（現在: {self.start_button['text']}）")
+                self.start_button.config(text="リネーム開始", state="normal")
+                logger.info(f"UIスレッドでボタンを「リネーム開始」に変更完了（現在: {self.start_button['text']}）")
+                
+                # UIの強制更新（複数の方法で試行）
+                try:
+                    self.root.update_idletasks()
+                    logger.info("ボタン変更後のupdate_idletasksを実行しました")
+                except Exception as update_error:
+                    logger.error(f"update_idletasksエラー: {update_error}")
+                
+                try:
+                    self.root.update()
+                    logger.info("ボタン変更後のupdateを実行しました")
+                except Exception as update_error:
+                    logger.error(f"updateエラー: {update_error}")
+                
+            except Exception as e:
+                print(f"DEBUG: _set_start_button_to_ready _set() error: {e}")
+                logger.error(f"_set_start_button_to_ready _set() error: {e}")
+        
+        # 即座に実行を試行
+        try:
+            _set()
+        except Exception as immediate_error:
+            logger.warning(f"即座実行に失敗、スケジュール実行に切り替え: {immediate_error}")
+            self.root.after(0, _set)
+
+    def _set_start_button_to_stop(self):
+        def _set():
+            logger.info(f"UIスレッドでボタンを「処理を停止」にリセット（現在: {self.start_button['text']}）")
+            self.start_button.config(text="処理を停止", state="normal")
+            logger.info(f"UIスレッドでボタンを「処理を停止」に変更完了（現在: {self.start_button['text']}）")
+        self.root.after(0, _set)
 
 def main():
     """メイン関数"""
