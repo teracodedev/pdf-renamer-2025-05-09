@@ -343,6 +343,29 @@ class PDFProcessor:
                     # リネーム前とリネーム後のファイル名が同じ場合はスキップ
                     if os.path.basename(pdf_file_path) == f"{new_name}{ext}":
                         logger.info(f"ファイル名が同じなので移動処理をスキップ: {os.path.basename(pdf_file_path)}")
+                        # ファイル名が同じでも、一時ディレクトリのファイルを元の場所に移動して元ファイルを置き換える
+                        temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
+                        if os.path.exists(temp_file_path):
+                            # 既存ファイルがあれば削除
+                            if os.path.exists(new_final_path):
+                                try:
+                                    os.remove(new_final_path)
+                                    logger.info(f"既存ファイルを削除しました: {new_final_path}")
+                                except OSError as e:
+                                    logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
+                            
+                            # 一時ファイルを元の場所に移動
+                            shutil.move(temp_file_path, new_final_path)
+                            logger.info(f"一時ファイルを元の場所に移動しました: {new_final_path}")
+                            
+                            # 元のファイルを削除
+                            if os.path.exists(pdf_file_path):
+                                try:
+                                    os.remove(pdf_file_path)
+                                    logger.info(f"元のファイルを削除しました: {pdf_file_path}")
+                                except OSError as e:
+                                    logger.error(f"元のファイル削除に失敗しました: {e}")
+                                    self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
                         return True
                     
                     # 既存ファイルがあれば削除
@@ -356,6 +379,18 @@ class PDFProcessor:
                     temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
                     if os.path.exists(temp_file_path):
                         shutil.move(temp_file_path, new_final_path)
+                        logger.info(f"リネーム後のファイルを移動しました: {new_final_path}")
+                        
+                        # 元のファイルを削除
+                        if os.path.exists(pdf_file_path):
+                            try:
+                                os.remove(pdf_file_path)
+                                logger.info(f"元のファイルを削除しました: {pdf_file_path}")
+                            except OSError as e:
+                                logger.error(f"元のファイル削除に失敗しました: {e}")
+                                self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
+                        else:
+                            logger.warning(f"元のファイルが見つかりません: {pdf_file_path}")
                     else:
                         logger.warning(f"一時ファイルが見つかりません: {temp_file_path}")
                     
@@ -373,9 +408,25 @@ class PDFProcessor:
             self._cleanup_temp_files(image_paths)
             if temp_dir and os.path.exists(temp_dir):
                 try:
+                    # 一時ディレクトリ内のファイルを確認
+                    temp_files = os.listdir(temp_dir)
+                    logger.info(f"一時ディレクトリ内のファイル: {temp_files}")
+                    
                     shutil.rmtree(temp_dir)
+                    logger.info(f"一時ディレクトリを削除しました: {temp_dir}")
                 except Exception as e:
                     logger.error(f"一時ディレクトリ削除エラー: {e}")
+                    # 個別にファイルを削除してみる
+                    try:
+                        for file in os.listdir(temp_dir):
+                            file_path = os.path.join(temp_dir, file)
+                            if os.path.isfile(file_path):
+                                os.remove(file_path)
+                                logger.info(f"個別ファイル削除: {file_path}")
+                        os.rmdir(temp_dir)
+                        logger.info(f"空の一時ディレクトリを削除しました: {temp_dir}")
+                    except Exception as cleanup_error:
+                        logger.error(f"個別ファイル削除エラー: {cleanup_error}")
             cleanup_time = time.time() - cleanup_start
             logger.info(f"一時ファイル削除完了: {cleanup_time:.2f}秒")
             total_time = time.time() - start_time
