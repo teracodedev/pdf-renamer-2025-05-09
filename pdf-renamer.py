@@ -784,6 +784,11 @@ class PDFRenamerApp:
                     self._add_to_status("処理が完了しました")
                     self._completion_message_shown = True
                     
+                    # ボタンの状態を再確認・修正
+                    if self.start_button['text'] != "リネーム開始":
+                        logger.warning("ボタンが「リネーム開始」になっていないため、強制修正します")
+                        self._set_start_button_to_ready()
+                    
                     # 完了ダイアログを表示
                     try:
                         messagebox.showinfo("処理完了", "処理が完了しました")
@@ -952,6 +957,10 @@ class PDFRenamerApp:
             try:
                 self.root.after(0, self._processing_completed, successful, total_files)
                 logger.info("処理完了処理をスケジュールしました")
+                
+                # 追加の安全策：少し遅れてボタン状態を再確認
+                self.root.after(100, self._ensure_button_state)
+                
             except Exception as e:
                 logger.error(f"処理完了処理のスケジュールエラー: {e}")
                 # エラーが発生した場合は直接実行
@@ -1004,8 +1013,11 @@ class PDFRenamerApp:
             # 完了メッセージをステータスキューに送信
             self.status_queue.put(f"処理完了: {successful}/{total} ファイルが正常に処理されました")
             
-            # ボタンを「リネーム開始」に戻す
+            # ボタンを「リネーム開始」に戻す（即座に実行）
             self._set_start_button_to_ready()
+            
+            # UIの強制更新
+            self.root.update()
             
             logger.info("処理完了処理が正常に完了しました")
                 
@@ -1180,9 +1192,8 @@ class PDFRenamerApp:
             self.root.quit()
 
     def _set_start_button_to_ready(self):
-        print("DEBUG: _set_start_button_to_ready called")
+        logger.info("_set_start_button_to_ready called")
         def _set():
-            print("DEBUG: _set_start_button_to_ready _set() called")
             try:
                 logger.info(f"UIスレッドでボタンを「リネーム開始」にリセット（現在: {self.start_button['text']}）")
                 self.start_button.config(text="リネーム開始", state="normal")
@@ -1201,8 +1212,10 @@ class PDFRenamerApp:
                 except Exception as update_error:
                     logger.error(f"updateエラー: {update_error}")
                 
+                # ボタンの状態を確認
+                logger.info(f"ボタン状態確認: text='{self.start_button['text']}', state='{self.start_button['state']}'")
+                
             except Exception as e:
-                print(f"DEBUG: _set_start_button_to_ready _set() error: {e}")
                 logger.error(f"_set_start_button_to_ready _set() error: {e}")
         
         # 即座に実行を試行
@@ -1218,6 +1231,17 @@ class PDFRenamerApp:
             self.start_button.config(text="処理を停止", state="normal")
             logger.info(f"UIスレッドでボタンを「処理を停止」に変更完了（現在: {self.start_button['text']}）")
         self.root.after(0, _set)
+
+    def _ensure_button_state(self):
+        """ボタンの状態を確認し、必要に応じて修正します。"""
+        try:
+            if not self.is_processing and self.start_button['text'] != "リネーム開始":
+                logger.warning("ボタン状態の不整合を検出、修正します")
+                self._set_start_button_to_ready()
+            else:
+                logger.info("ボタン状態は正常です")
+        except Exception as e:
+            logger.error(f"ボタン状態確認エラー: {e}")
 
 def main():
     """メイン関数"""
