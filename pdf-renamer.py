@@ -773,28 +773,22 @@ class PDFRenamerApp:
                 self.status_text.see(tk.END)
                 self.root.update_idletasks()
             
-            # 処理完了の検知とUI更新
+            # 処理完了の検知とUI更新（重複を避けるため簡素化）
             if not self.is_processing and self.processing_complete:
                 logger.info("_poll_status_queueで処理完了を検知しました")
-                try:
-                    # ボタンを確実に「リネーム開始」に戻す
-                    self._set_start_button_to_ready()
-                    logger.info("_poll_status_queueでボタンを更新しました")
-                    
-                    # 完了メッセージを表示
+                # 処理完了フラグをリセット（一度だけ実行）
+                self.processing_complete = False
+                
+                # 完了メッセージを表示（重複を避けるため条件付き）
+                if not hasattr(self, '_completion_message_shown'):
                     self._add_to_status("処理が完了しました")
+                    self._completion_message_shown = True
                     
                     # 完了ダイアログを表示
                     try:
                         messagebox.showinfo("処理完了", "処理が完了しました")
                     except Exception as dialog_error:
                         logger.error(f"ダイアログ表示エラー: {dialog_error}")
-                    
-                    # 処理完了フラグをリセット
-                    self.processing_complete = False
-                    
-                except Exception as e:
-                    logger.error(f"_poll_status_queueでのUI更新エラー: {e}")
                 
         except Exception as e:
             logger.error(f"ステータスキュー処理エラー: {e}")
@@ -949,42 +943,24 @@ class PDFRenamerApp:
             
             logger.info(f"全処理完了: {successful}/{total_files} ファイルが成功")
             
-            # 処理状態をリセット（エラーが発生しても確実に実行）
+            # 処理状態をリセット
             self.is_processing = False
-            self.processing_complete = True  # 処理完了フラグを設定
-            logger.info("is_processingをFalseに設定しました")
-            logger.info("processing_completeをTrueに設定しました")
+            self.processing_complete = True
+            logger.info("処理状態をリセットしました")
             
-            # UI更新をメインスレッドで実行（複数の方法で確実に実行）
-            logger.info("_processing_completedメソッドを呼び出す準備をしています...")
-            
-            # 方法1: afterでスケジュール
+            # UI更新をメインスレッドで実行
             try:
                 self.root.after(0, self._processing_completed, successful, total_files)
-                logger.info("_processing_completedメソッドの呼び出しをスケジュールしました")
+                logger.info("処理完了処理をスケジュールしました")
             except Exception as e:
-                logger.error(f"_processing_completedメソッドのスケジュールエラー: {e}")
-                
-                # 方法2: 直接呼び出し
+                logger.error(f"処理完了処理のスケジュールエラー: {e}")
+                # エラーが発生した場合は直接実行
                 try:
                     self._processing_completed(successful, total_files)
-                    logger.info("_processing_completedメソッドを直接呼び出しました")
                 except Exception as direct_error:
-                    logger.error(f"_processing_completedメソッドの直接呼び出しエラー: {direct_error}")
-                    
-                    # 方法3: 最後の手段としてボタンのみ更新
-                    try:
-                        self._set_start_button_to_ready()
-                        logger.info("最終手段としてボタンのみ更新しました")
-                    except Exception as final_error:
-                        logger.error(f"最終手段のボタン更新エラー: {final_error}")
-            
-            # 追加のUI更新を強制実行
-            try:
-                self.root.update_idletasks()
-                logger.info("処理完了後の追加UI更新を実行しました")
-            except Exception as update_error:
-                logger.error(f"追加UI更新エラー: {update_error}")
+                    logger.error(f"処理完了処理の直接実行エラー: {direct_error}")
+                    # 最終手段としてボタンのみ更新
+                    self._set_start_button_to_ready()
         
     def _stop_processing(self):
         """処理を停止します。"""
@@ -1011,52 +987,33 @@ class PDFRenamerApp:
             logger.error(f"進捗更新エラー: {e}")
         
     def _processing_completed(self, successful, total):
-        print("DEBUG: _processing_completed called")
+        """処理完了時の処理を一元化します。"""
         logger.info(f"_processing_completedメソッドが呼び出されました: 成功={successful}, 総数={total}")
         try:
+            # 処理状態をリセット
             self.is_processing = False
             self.processing_complete = True
-            logger.info("処理完了フラグを設定しました")
             
-            # UIの更新（確実に実行）
-            try:
-                self.progress_var.set(100)
-                logger.info("進捗バーを100%に設定しました")
-            except Exception as ui_error:
-                logger.error(f"UI更新エラー: {ui_error}")
+            # 完了メッセージフラグをリセット
+            if hasattr(self, '_completion_message_shown'):
+                delattr(self, '_completion_message_shown')
             
-            # 完了メッセージ
-            self._add_to_status(f"処理完了: {successful}/{total} ファイルが正常に処理されました")
+            # 進捗バーを100%に設定
+            self.progress_var.set(100)
             
-            # 完了ダイアログを表示
-            try:
-                messagebox.showinfo(
-                    "処理完了",
-                    f"処理が完了しました\n成功: {successful}/{total}"
-                )
-            except Exception as dialog_error:
-                logger.error(f"ダイアログ表示エラー: {dialog_error}")
+            # 完了メッセージをステータスキューに送信
+            self.status_queue.put(f"処理完了: {successful}/{total} ファイルが正常に処理されました")
             
-            # リセット処理
-            self._reset_after_processing()
-            
-            # ボタンを確実に「リネーム開始」に戻す
-            print("DEBUG: calling _set_start_button_to_ready (final)")
+            # ボタンを「リネーム開始」に戻す
             self._set_start_button_to_ready()
             
-            # UIの強制更新
-            try:
-                self.root.update()
-                logger.info("UIの強制更新を実行しました")
-            except Exception as update_error:
-                logger.error(f"UI強制更新エラー: {update_error}")
+            logger.info("処理完了処理が正常に完了しました")
                 
         except Exception as e:
-            print(f"DEBUG: _processing_completed error: {e}")
             logger.error(f"処理完了処理エラー: {e}")
             # エラーが発生してもボタンを戻す
             self._set_start_button_to_ready()
-            
+        
     def _reset_after_processing(self):
         """処理完了後のリセットを行います。"""
         try:
