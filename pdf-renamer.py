@@ -353,19 +353,10 @@ class PDFProcessor:
                                     logger.info(f"既存ファイルを削除しました: {new_final_path}")
                                 except OSError as e:
                                     logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
-                            
                             # 一時ファイルを元の場所に移動
                             shutil.move(temp_file_path, new_final_path)
                             logger.info(f"一時ファイルを元の場所に移動しました: {new_final_path}")
-                            
-                            # 元のファイルを削除
-                            if os.path.exists(pdf_file_path):
-                                try:
-                                    os.remove(pdf_file_path)
-                                    logger.info(f"元のファイルを削除しました: {pdf_file_path}")
-                                except OSError as e:
-                                    logger.error(f"元のファイル削除に失敗しました: {e}")
-                                    self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
+                            # 元のファイルの削除は不要（shutil.moveで既に移動済み）
                         return True
                     
                     # 既存ファイルがあれば削除
