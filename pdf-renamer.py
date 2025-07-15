@@ -849,10 +849,10 @@ class PDFRenamerApp:
                         self._set_start_button_to_ready()
                     
                     # 完了ダイアログを表示
-                    try:
-                        messagebox.showinfo("処理完了", "処理が完了しました")
-                    except Exception as dialog_error:
-                        logger.error(f"ダイアログ表示エラー: {dialog_error}")
+                    # try:
+                    #     messagebox.showinfo("処理完了", "処理が完了しました")
+                    # except Exception as dialog_error:
+                    #     logger.error(f"ダイアログ表示エラー: {dialog_error}")
                 
         except Exception as e:
             logger.error(f"ステータスキュー処理エラー: {e}")
