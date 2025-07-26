@@ -61,7 +61,7 @@ for handler in logging.root.handlers[:]:
 
 # ログの基本設定
 logging.basicConfig(
-    level=logging.INFO,  # DEBUGからINFOに変更
+    level=logging.DEBUG,  # DEBUGログを有効化
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler(log_file_path, encoding="utf-8", mode='w'),
@@ -70,7 +70,7 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)  # DEBUGからINFOに変更
+logger.setLevel(logging.DEBUG)  # DEBUGログを有効化
 
 # 初期化ログの出力
 logger.debug("=" * 50)
@@ -90,7 +90,14 @@ class ConfigManager:
         
     def load_config(self):
         try:
+            logger.debug(f".envファイルの絶対パス: {os.path.abspath(self.env_path)}")
+            if os.path.exists(self.env_path):
+                logger.debug(f".envファイルが存在します: {self.env_path}")
+            else:
+                logger.warning(f".envファイルが存在しません: {self.env_path}")
+            logger.debug(f".envファイルの読み込みを開始します: {self.env_path}")
             load_dotenv(self.env_path)
+            logger.debug(f".envファイルの読み込みが完了しました: {self.env_path}")
             
             # 必要な設定
             self.config['PDF_FOLDER_PATH'] = os.getenv('PDF_FOLDER_PATH', '')
@@ -114,6 +121,9 @@ class ConfigManager:
             os.makedirs(self.config['IMAGE_FILE_PATH'], exist_ok=True)
             
             logger.info(f"設定を{self.env_path}から読み込みました")
+            logger.debug("現在の設定値:")
+            for k, v in self.config.items():
+                logger.debug(f"  {k} = {v}")
             
         except Exception as e:
             logger.error(f"設定の読み込みエラー: {e}")
@@ -336,13 +346,17 @@ class PDFProcessor:
                 rename_time = time.time() - rename_start
                 logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: {rename_success})")
                 if rename_success:
-                    # 元のディレクトリに移動
+                    # 元のディレクトリに移動（Windowsエクスプローラーと同じルールで連番を付ける）
                     ext = os.path.splitext(pdf_file_path)[1]
-                    new_final_path = os.path.join(os.path.dirname(pdf_file_path), f"{new_name}{ext}")
+                    base_filename = f"{new_name}{ext}"
+                    
+                    # Windowsエクスプローラーと同じルールでユニークなファイル名を生成
+                    unique_filename = self._get_unique_filename(pdf_file_path, base_filename)
+                    new_final_path = os.path.join(os.path.dirname(pdf_file_path), unique_filename)
                     logger.info(f"リネーム後のファイルを元の場所に移動: {new_final_path}")
                     
                     # リネーム前とリネーム後のファイル名が同じ場合はスキップ
-                    if os.path.basename(pdf_file_path) == f"{new_name}{ext}":
+                    if os.path.basename(pdf_file_path) == unique_filename:
                         logger.info(f"ファイル名が同じなので移動処理をスキップ: {os.path.basename(pdf_file_path)}")
                         # ファイル名が同じでも、一時ディレクトリのファイルを元の場所に移動して元ファイルを置き換える
                         temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
@@ -360,14 +374,7 @@ class PDFProcessor:
                             # 元のファイルの削除は不要（shutil.moveで既に移動済み）
                         return True
                     
-                    # 既存ファイルがあれば削除
-                    if os.path.exists(new_final_path):
-                        try:
-                            os.remove(new_final_path)
-                        except OSError as e:
-                            logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
-                    
-                    # 一時ファイルを元の場所に移動
+                    # 一時ファイルを元の場所に移動（上書きではなく、ユニークな名前で保存）
                     temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
                     if os.path.exists(temp_file_path):
                         shutil.move(temp_file_path, new_final_path)
@@ -580,6 +587,25 @@ class PDFProcessor:
         
         return filename
         
+    def _get_unique_filename(self, base_path, filename):
+        """Windowsエクスプローラーと同じルールでユニークなファイル名を生成します。"""
+        directory = os.path.dirname(base_path)
+        name, ext = os.path.splitext(filename)
+        
+        # 最初に元の名前を試す
+        test_path = os.path.join(directory, filename)
+        if not os.path.exists(test_path):
+            return filename
+        
+        # 連番を付けて試す (1), (2), (3)...
+        counter = 1
+        while True:
+            new_filename = f"{name} ({counter}){ext}"
+            test_path = os.path.join(directory, new_filename)
+            if not os.path.exists(test_path):
+                return new_filename
+            counter += 1
+    
     def _rename_pdf(self, pdf_file_path, new_name):
         """PDFファイルをリネームします（バックグラウンドスレッドで実行）。"""
         result = {'success': False}
@@ -592,10 +618,16 @@ class PDFProcessor:
                     self.status_queue.put(error_msg)
                     result['success'] = False
                     return
+                
                 # 拡張子を保持
                 ext = os.path.splitext(pdf_file_path)[1]
-                new_path = os.path.join(os.path.dirname(pdf_file_path), f"{new_name}{ext}")
-                logger.info(f"リネーム処理開始: {os.path.basename(pdf_file_path)} -> {os.path.basename(new_path)}")
+                base_filename = f"{new_name}{ext}"
+                
+                # Windowsエクスプローラーと同じルールでユニークなファイル名を生成
+                unique_filename = self._get_unique_filename(pdf_file_path, base_filename)
+                new_path = os.path.join(os.path.dirname(pdf_file_path), unique_filename)
+                
+                logger.info(f"リネーム処理開始: {os.path.basename(pdf_file_path)} -> {unique_filename}")
                 logger.info(f"元ファイルパス: {pdf_file_path}")
                 logger.info(f"新ファイルパス: {new_path}")
                 
@@ -606,19 +638,10 @@ class PDFProcessor:
                     result['success'] = True
                     return
                 
-                # 既存ファイルがあれば削除して上書き
-                if os.path.exists(new_path):
-                    logger.info(f"既存ファイルを削除します: {new_path}")
-                    try:
-                        os.remove(new_path)
-                    except OSError as e:
-                        logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
-                        # 削除に失敗しても続行（ファイルが存在しない場合など）
-                
-                # ファイルの移動
+                # ファイルの移動（上書きではなく、ユニークな名前で保存）
                 shutil.move(pdf_file_path, new_path)
-                logger.info(f"ファイルをリネームしました: {os.path.basename(pdf_file_path)} -> {os.path.basename(new_path)}")
-                self.status_queue.put(f"リネーム成功: {os.path.basename(new_path)}")
+                logger.info(f"ファイルをリネームしました: {os.path.basename(pdf_file_path)} -> {unique_filename}")
+                self.status_queue.put(f"リネーム成功: {unique_filename}")
                 result['success'] = True
             except Exception as e:
                 logger.error(f"ファイルリネームエラー: {e}")
