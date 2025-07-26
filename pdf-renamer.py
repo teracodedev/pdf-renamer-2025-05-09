@@ -275,6 +275,11 @@ class PDFProcessor:
                 self.status_queue.put(error_msg)
                 logger.error(error_msg)
         
+        # 適用可能なルールを優先順位でソート（優先順位が低いほど先に適用）
+        if applicable_rules:
+            applicable_rules.sort(key=lambda x: x.get('優先順位', 999))
+            logger.info(f"適用可能なルールを優先順位でソートしました: {[rule.get('説明', '説明なし') for rule in applicable_rules]}")
+        
         if not applicable_rules:
             self.status_queue.put("適用可能なルールが見つかりませんでした")
             logger.warning("適用可能なルールが見つかりませんでした")
@@ -324,6 +329,7 @@ class PDFProcessor:
             # OCR結果を結合
             combined_ocr = "\n".join(filter(None, ocr_results))
             logger.info(f"OCR結果文字数: {len(combined_ocr)}文字")
+            logger.info(f"OCR結果内容:\n{combined_ocr}")
             # 適用可能なルールを確認
             rules_start = time.time()
             applicable_rules = self._check_applicable_rules(combined_ocr)
@@ -504,6 +510,14 @@ class PDFProcessor:
             
             ocr_time = time.time() - start_time
             logger.info(f"OCR処理完了: {os.path.basename(image_path)} ({ocr_time:.2f}秒)")
+            
+            # OCR結果をログに出力
+            if result:
+                logger.info(f"OCR結果文字数: {len(result)}文字")
+                logger.info(f"OCR結果内容:\n{result}")
+            else:
+                logger.warning("OCR結果が空です")
+                
             return result
             
         except Exception as e:
