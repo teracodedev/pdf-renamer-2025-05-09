@@ -1210,7 +1210,7 @@ class PDFRenamerApp:
         try:
             # デフォルトのファイル名を生成
             timestamp = datetime.now().strftime("%Y年%m月%d日%H時%M分%S秒")
-            default_filename = f".env.backup({timestamp})"
+            default_filename = f"backup({timestamp}).env"
             
             # ファイル保存ダイアログを表示
             file_path = filedialog.asksaveasfilename(
