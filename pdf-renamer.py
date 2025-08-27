@@ -241,6 +241,12 @@ class PDFProcessor:
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
         logger.debug(f"名刺読み取りモード: {business_card_mode}")
+        logger.info(f"PDFProcessor初期化 - 名刺読み取りモード: {business_card_mode}")
+        
+        if business_card_mode:
+            logger.info("名刺読み取りモードが有効です - 名刺専用のファイル名生成を行います")
+        else:
+            logger.info("通常モードで動作します")
         
     def load_yaml_rules(self):
         """YAMLファイルからリネームルールを読み込みます。"""
@@ -264,6 +270,24 @@ class PDFProcessor:
             logger.info(f"ルールの総数: {total_rules}個")
             self._rules_count_displayed = True
         
+        # 名刺読み取りモードの場合の特別処理
+        if self.business_card_mode:
+            logger.info("名刺読み取りモード: 名刺のリネームルールを優先的に適用します")
+            # 名刺のリネームルールを探す
+            business_card_rule = None
+            for rule in self.rules:
+                if rule.get('説明') == "名刺のリネームルール":
+                    business_card_rule = rule
+                    break
+            
+            if business_card_rule:
+                logger.info("名刺のリネームルールが見つかりました")
+                self.status_queue.put("名刺読み取りモード: 名刺のリネームルールを適用します")
+                return [business_card_rule]  # 名刺ルールのみを返す
+            else:
+                logger.warning("名刺のリネームルールが見つかりませんでした")
+        
+        # 通常のルール適用処理
         for rule in self.rules:
             try:
                 pattern = rule.get('正規表現', '')
@@ -530,26 +554,69 @@ class PDFProcessor:
         start_time = time.time()
         try:
             logger.info(f"OpenAI API呼び出し開始: {os.path.basename(pdf_file_path)}")
+            logger.info(f"名刺読み取りモード: {self.business_card_mode}")
             
             # 現在の日付を取得
             current_date = datetime.now().strftime("%Y年%m月%d日")
             
-            # プロンプトの作成
-            prompt = f"""
-            以下のOCR結果から、適切なファイル名を生成してください。
-            
-            OCR結果:
-            {ocr_text}
-            
-            現在の日付: {current_date}
-            担当者: {self.selected_person}
-            
-            以下の適用可能なルールに従ってファイル名を生成してください：
-            {json.dumps(applicable_rules, ensure_ascii=False, indent=2)}
-            
-            以下の形式でJSONを返してください：
-            {{"filename": "生成されたファイル名", "used_rule": "使用したルールの説明"}}
-            """
+            # 名刺読み取りモードの場合の特別なプロンプト
+            if self.business_card_mode:
+                # 名刺のリネームルールのプロンプトを使用
+                business_card_rule = None
+                for rule in applicable_rules:
+                    if rule.get('説明') == "名刺のリネームルール":
+                        business_card_rule = rule
+                        break
+                
+                if business_card_rule:
+                    # YAMLファイルの名刺ルールのプロンプトを使用
+                    rule_prompt = business_card_rule.get('プロンプト', '')
+                    # プレースホルダーを置換
+                    prompt = rule_prompt.replace('{ocr_result}', ocr_text)
+                    prompt = prompt.replace('{書類の種類}', business_card_rule.get('書類の種類', '名刺'))
+                    prompt = prompt.replace('{命名ルール}', business_card_rule.get('命名ルール', ''))
+                    prompt = prompt.replace('{担当者}', self.selected_person)
+                    
+                    logger.info("名刺読み取りモード: YAMLファイルの名刺ルールプロンプトを使用")
+                    self.status_queue.put("名刺読み取りモード: 名刺専用のプロンプトを使用してファイル名を生成します")
+                else:
+                    # フォールバック用の名刺プロンプト
+                    prompt = f"""
+                    以下のOCR結果は名刺から読み取られたものです。名刺の内容に基づいて適切なファイル名を生成してください。
+                    
+                    OCR結果:
+                    {ocr_text}
+                    
+                    現在の日付: {current_date}
+                    担当者: {self.selected_person}
+                    
+                    名刺の情報（会社名、役職、氏名など）を適切に組み合わせて、
+                    以下の形式でファイル名を生成してください：
+                    - 会社名_氏名_役職
+                    - 氏名_会社名
+                    - 会社名_氏名
+                    など、名刺の内容に最も適した形式を選択してください。
+                    
+                    以下の形式でJSONを返してください：
+                    {{"filename": "生成されたファイル名", "used_rule": "名刺読み取りモード"}}
+                    """
+            else:
+                # 通常のプロンプト
+                prompt = f"""
+                以下のOCR結果から、適切なファイル名を生成してください。
+                
+                OCR結果:
+                {ocr_text}
+                
+                現在の日付: {current_date}
+                担当者: {self.selected_person}
+                
+                以下の適用可能なルールに従ってファイル名を生成してください：
+                {json.dumps(applicable_rules, ensure_ascii=False, indent=2)}
+                
+                以下の形式でJSONを返してください：
+                {{"filename": "生成されたファイル名", "used_rule": "使用したルールの説明"}}
+                """
             
             # ChatGPT-4にリクエスト
             response = self.openai_client.chat.completions.create(
@@ -738,12 +805,33 @@ class PDFRenamerApp:
         
         # 名刺モード
         self.business_card_var = tk.BooleanVar(value=self.business_card_mode)
-        ttk.Checkbutton(
+        self.business_card_checkbox = ttk.Checkbutton(
             main_frame,
             text="名刺読み取りモード",
             variable=self.business_card_var,
-            command=self._toggle_business_card_mode
-        ).grid(row=2, column=0, columnspan=3, sticky=tk.N, pady=5)
+            command=self._toggle_business_card_mode,
+            style="TCheckbutton"
+        )
+        self.business_card_checkbox.grid(row=2, column=0, columnspan=3, sticky=tk.N, pady=(5, 0))
+        
+        # チェックボックスの状態を確認するためのデバッグ情報
+        logger.info(f"名刺チェックボックス作成: {self.business_card_checkbox}")
+        logger.info(f"チェックボックスの状態: {self.business_card_var.get()}")
+        
+        # 名刺モードの説明ラベル
+        self.business_card_label = ttk.Label(
+            main_frame,
+            text="名刺読み取りモードが有効の場合、「名刺のリネームルール」が優先的に適用されます",
+            font=("", 8),
+            foreground="gray"
+        )
+        self.business_card_label.grid(row=3, column=0, columnspan=3, sticky=tk.N, pady=(0, 5))
+        
+        # チェックボックスの状態変更を監視
+        self.business_card_var.trace_add('write', self._on_business_card_mode_changed)
+        
+        # 名刺モードの初期状態をログに出力
+        logger.info(f"名刺読み取りモード初期状態: {self.business_card_mode}")
         
         # 開始/停止ボタン
         self.start_button = ttk.Button(
@@ -751,7 +839,7 @@ class PDFRenamerApp:
             text="リネーム開始",
             command=self._start_renaming
         )
-        self.start_button.grid(row=3, column=0, columnspan=3, pady=10)
+        self.start_button.grid(row=4, column=0, columnspan=3, pady=10)
         
         # 進捗バー
         self.progress_var = tk.DoubleVar()
@@ -760,14 +848,14 @@ class PDFRenamerApp:
             variable=self.progress_var,
             maximum=100
         )
-        self.progress_bar.grid(row=4, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        self.progress_bar.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         
         # ステータス表示
         self.status_text = scrolledtext.ScrolledText(main_frame, height=12, width=50)
-        self.status_text.grid(row=5, column=0, columnspan=3, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.status_text.grid(row=6, column=0, columnspan=3, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # ステータス表示エリアの拡張設定
-        main_frame.rowconfigure(5, weight=1)
+        main_frame.rowconfigure(6, weight=1)
         
         # 終了ボタン
         self.exit_button = ttk.Button(
@@ -775,7 +863,7 @@ class PDFRenamerApp:
             text="終了",
             command=self._exit_app
         )
-        self.exit_button.grid(row=6, column=0, columnspan=3, pady=5)
+        self.exit_button.grid(row=7, column=0, columnspan=3, pady=5)
         
         # メニューの作成
         self._create_menu()
@@ -956,7 +1044,12 @@ class PDFRenamerApp:
         self.is_processing = True
         self.processing_complete = False
         self._set_start_button_to_stop()
+        
+        # 名刺読み取りモードの状態をログに出力
+        logger.info(f"名刺読み取りモード: {self.business_card_mode}")
         self._add_to_status(f"処理開始: {len(pdf_files)}個のファイルを処理します")
+        if self.business_card_mode:
+            self._add_to_status("名刺読み取りモードが有効です")
         
         # バックグラウンドスレッドで処理を実行
         thread = threading.Thread(
@@ -975,6 +1068,9 @@ class PDFRenamerApp:
         
         logger.info(f"PDFファイル処理開始: 合計{total_files}個のファイル")
         logger.info(f"処理対象ファイル: {pdf_files}")
+        
+        # 名刺読み取りモードの状態をログに出力
+        logger.info(f"PDFProcessor作成時の名刺読み取りモード: {self.business_card_mode}")
         
         # 単一のPDFProcessorインスタンスを作成（全ファイルで共有）
         processor = PDFProcessor(
@@ -1242,11 +1338,24 @@ class PDFRenamerApp:
     def _toggle_business_card_mode(self):
         """名刺モードを切り替えます。"""
         self.business_card_mode = self.business_card_var.get()
+        logger.info(f"名刺読み取りモードを切り替え: {self.business_card_mode}")
         self._add_to_status(
             "名刺読み取りモードを" +
             ("有効" if self.business_card_mode else "無効") +
             "にしました"
         )
+        
+    def _on_business_card_mode_changed(self, *args):
+        """名刺読み取りモードの状態変更を監視します。"""
+        current_mode = self.business_card_var.get()
+        if current_mode != self.business_card_mode:
+            self.business_card_mode = current_mode
+            logger.info(f"名刺読み取りモード状態変更を検出: {self.business_card_mode}")
+            self._add_to_status(
+                "名刺読み取りモードが" +
+                ("有効" if self.business_card_mode else "無効") +
+                "になりました"
+            )
         
     def _on_closing(self):
         """アプリケーション終了時の処理。"""
