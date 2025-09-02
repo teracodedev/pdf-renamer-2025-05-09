@@ -50,7 +50,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = SCRIPT_DIR / '.env'
 DEFAULT_YAML_PATH = SCRIPT_DIR / 'rename_rules.yaml'
 DEFAULT_IMAGE_PATH = SCRIPT_DIR / 'temp_images'
-APP_VERSION = "2025年6月4日バージョン（パフォーマンス最適化版）"
+APP_VERSION = "2025年6月4日バージョン（パフォーマンス最適化版・GPT-5対応）"
 
 # ログの設定
 log_file_path = os.path.join(SCRIPT_DIR, "pdf-renamer.log")
@@ -108,7 +108,7 @@ class ConfigManager:
             self.config['POPPLER_PATH'] = self._find_poppler_path()
             
             # AIモデル設定
-            self.config['OPENAI_MODEL'] = os.getenv('OPENAI_MODEL', 'gpt-3.5-turbo')
+            self.config['OPENAI_MODEL'] = os.getenv('OPENAI_MODEL', 'gpt-5-mini')
             self.config['OPENAI_TEMPERATURE'] = float(os.getenv('OPENAI_TEMPERATURE', '0.0'))
             
             # オプション設定
@@ -553,7 +553,9 @@ class PDFProcessor:
         """ChatGPT-4を使用してファイル名を生成します。"""
         start_time = time.time()
         try:
+            current_model = self.config_manager.get('OPENAI_MODEL')
             logger.info(f"OpenAI API呼び出し開始: {os.path.basename(pdf_file_path)}")
+            logger.info(f"使用モデル: {current_model}")
             logger.info(f"名刺読み取りモード: {self.business_card_mode}")
             
             # 現在の日付を取得
@@ -618,15 +620,50 @@ class PDFProcessor:
                 {{"filename": "生成されたファイル名", "used_rule": "使用したルールの説明"}}
                 """
             
-            # ChatGPT-4にリクエスト
-            response = self.openai_client.chat.completions.create(
-                model=self.config_manager.get('OPENAI_MODEL'),
-                messages=[
-                    {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。"},
-                    {"role": "user", "content": prompt}
-                ],
-                temperature=self.config_manager.get('OPENAI_TEMPERATURE')
-            )
+            # OpenAI APIにリクエスト
+            try:
+                # GPT-5モデルの場合はtemperatureを調整
+                temperature = self.config_manager.get('OPENAI_TEMPERATURE')
+                if current_model.startswith('gpt-5'):
+                    # GPT-5モデルはtemperature=1.0のみサポート
+                    temperature = 1.0
+                    logger.info(f"GPT-5モデルのため、temperatureを1.0に調整: {current_model}")
+                
+                response = self.openai_client.chat.completions.create(
+                    model=current_model,
+                    messages=[
+                        {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。"},
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=temperature
+                )
+            except Exception as api_error:
+                logger.error(f"OpenAI API呼び出しエラー: {api_error}")
+                logger.error(f"エラータイプ: {type(api_error).__name__}")
+                
+                # GPT-5-nanoが利用できない場合はGPT-5-miniにフォールバック
+                if current_model == "gpt-5-nano":
+                    logger.warning("GPT-5-nanoが利用できません。GPT-5-miniにフォールバックします。")
+                    self.status_queue.put("警告: GPT-5-nanoが利用できません。GPT-5-miniに切り替えます。")
+                    
+                    # GPT-5-miniで再試行
+                    try:
+                        response = self.openai_client.chat.completions.create(
+                            model="gpt-5-mini",
+                            messages=[
+                                {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。"},
+                                {"role": "user", "content": prompt}
+                            ],
+                            temperature=1.0  # GPT-5-miniはtemperature=1.0のみサポート
+                        )
+                        logger.info("GPT-5-miniでの再試行が成功しました")
+                        self.status_queue.put("GPT-5-miniでの処理が成功しました")
+                    except Exception as fallback_error:
+                        logger.error(f"GPT-5-miniでの再試行も失敗: {fallback_error}")
+                        raise fallback_error
+                else:
+                    # その他のモデルの場合はエラーをそのまま投げる
+                    raise api_error
             
             # レスポンスの解析
             result = response.choices[0].message.content
@@ -645,7 +682,18 @@ class PDFProcessor:
                 
         except Exception as e:
             ai_time = time.time() - start_time
-            logger.error(f"ChatGPT-4 APIエラー: {e} ({ai_time:.2f}秒)")
+            logger.error(f"OpenAI APIエラー: {e} ({ai_time:.2f}秒)")
+            logger.error(f"エラーの詳細: {traceback.format_exc()}")
+            
+            # エラーメッセージをステータスキューに送信
+            error_msg = f"AI処理エラー: {str(e)}"
+            self.status_queue.put(error_msg)
+            
+            # モデルが利用できない場合の追加情報
+            if "model" in str(e).lower() or "not found" in str(e).lower():
+                self.status_queue.put("ヒント: 選択したAIモデルが利用できない可能性があります")
+                self.status_queue.put("設定メニューから別のモデルを試してください")
+            
             return None
         finally:
             ai_time = time.time() - start_time
@@ -827,6 +875,15 @@ class PDFRenamerApp:
         )
         self.business_card_label.grid(row=3, column=0, columnspan=3, sticky=tk.N, pady=(0, 5))
         
+        # AIモデル情報ラベル
+        self.ai_model_label = ttk.Label(
+            main_frame,
+            text=f"現在のAIモデル: {self.config_manager.get('OPENAI_MODEL', 'gpt-5-mini')}",
+            font=("", 8),
+            foreground="blue"
+        )
+        self.ai_model_label.grid(row=4, column=0, columnspan=3, sticky=tk.N, pady=(0, 5))
+        
         # チェックボックスの状態変更を監視
         self.business_card_var.trace_add('write', self._on_business_card_mode_changed)
         
@@ -839,7 +896,7 @@ class PDFRenamerApp:
             text="リネーム開始",
             command=self._start_renaming
         )
-        self.start_button.grid(row=4, column=0, columnspan=3, pady=10)
+        self.start_button.grid(row=5, column=0, columnspan=3, pady=10)
         
         # 進捗バー
         self.progress_var = tk.DoubleVar()
@@ -848,14 +905,14 @@ class PDFRenamerApp:
             variable=self.progress_var,
             maximum=100
         )
-        self.progress_bar.grid(row=5, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
+        self.progress_bar.grid(row=6, column=0, columnspan=3, sticky=(tk.W, tk.E), pady=5)
         
         # ステータス表示
         self.status_text = scrolledtext.ScrolledText(main_frame, height=12, width=50)
-        self.status_text.grid(row=6, column=0, columnspan=3, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
+        self.status_text.grid(row=7, column=0, columnspan=3, pady=5, sticky=(tk.W, tk.E, tk.N, tk.S))
         
         # ステータス表示エリアの拡張設定
-        main_frame.rowconfigure(6, weight=1)
+        main_frame.rowconfigure(7, weight=1)
         
         # 終了ボタン
         self.exit_button = ttk.Button(
@@ -863,7 +920,7 @@ class PDFRenamerApp:
             text="終了",
             command=self._exit_app
         )
-        self.exit_button.grid(row=7, column=0, columnspan=3, pady=5)
+        self.exit_button.grid(row=8, column=0, columnspan=3, pady=5)
         
         # メニューの作成
         self._create_menu()
@@ -885,10 +942,28 @@ class PDFRenamerApp:
         menubar.add_cascade(label="設定", menu=settings_menu)
         
         # AIモデル選択
-        model_menu = tk.Menu(settings_menu, tearoff=0)
-        settings_menu.add_cascade(label="AIモデル", menu=model_menu)
-        model_menu.add_command(label="GPT-4.1", command=lambda: self._set_ai_model("gpt-4.1"))
-        model_menu.add_command(label="GPT-4", command=lambda: self._set_ai_model("gpt-4"))
+        self.model_menu = tk.Menu(settings_menu, tearoff=0)
+        settings_menu.add_cascade(label="AIモデル", menu=self.model_menu)
+        
+        # モデル選択用の変数
+        self.model_var = tk.StringVar(value=self.config_manager.get('OPENAI_MODEL', 'gpt-5-mini'))
+        
+        # ラジオボタンスタイルのメニューアイテム
+        self.model_menu.add_radiobutton(
+            label="GPT-5-mini (推奨)", 
+            variable=self.model_var, 
+            value="gpt-5-mini",
+            command=lambda: self._set_ai_model("gpt-5-mini")
+        )
+        self.model_menu.add_radiobutton(
+            label="GPT-5-nano (軽量)", 
+            variable=self.model_var, 
+            value="gpt-5-nano",
+            command=lambda: self._set_ai_model("gpt-5-nano")
+        )
+        self.model_menu.add_separator()
+        self.model_menu.add_command(label="モデル確認", command=self._check_current_model)
+        self.model_menu.add_command(label="利用可能モデル一覧", command=self._list_available_models)
 
         # ルールメニュー
         rules_menu = tk.Menu(menubar, tearoff=0)
@@ -1232,7 +1307,9 @@ class PDFRenamerApp:
             f"PDF Renamer {APP_VERSION}\n\n"
             "OCR、Google Cloud Vision、およびOpenAIを使用して\n"
             "PDFファイルを内容に基づいて自動的にリネームするツール\n\n"
-            "パフォーマンス最適化版"
+            "パフォーマンス最適化版\n"
+            "対応モデル: GPT-5-mini, GPT-5-nano\n"
+            "モデル選択: 有効"
         )
         
     def _show_help(self):
@@ -1244,6 +1321,13 @@ class PDFRenamerApp:
 2. 担当者を選択（必要な場合）
 3. 名刺読み取りモードを選択（必要な場合）
 4. 「リネーム開始」ボタンをクリック
+
+AIモデル設定:
+- 設定メニューから「AIモデル」を選択
+- GPT-5-mini (推奨): 高速で効率的な処理
+- GPT-5-nano (軽量): 超軽量で低コストな処理
+- モデル確認: 現在のモデルの利用可能性をテスト
+- 利用可能モデル一覧: 実際に利用可能なモデルを確認
 
 注意事項:
 - PDFファイルは自動的に内容に基づいてリネームされます
@@ -1258,15 +1342,175 @@ class PDFRenamerApp:
 - PDFProcessorインスタンスの共有
 - 詳細なログ出力によるデバッグ機能
 - UI応答性の改善
+- GPT-5-miniとGPT-5-nanoの選択可能
+- モデル選択機能を有効化
         """
         messagebox.showinfo("使い方", help_text)
         
     def _set_ai_model(self, model):
         """AIモデルを設定します。"""
+        # モデルの存在確認
+        if not self._check_model_availability(model):
+            self._add_to_status(f"警告: {model}が利用できない可能性があります")
+            self._add_to_status("GPT-5-miniにフォールバックすることをお勧めします")
+        
         self.config_manager.set('OPENAI_MODEL', model)
         self.config_manager.save_config()
         self._add_to_status(f"AIモデルを{model}に変更しました")
         
+        # AIモデル情報ラベルの更新
+        self.ai_model_label.config(text=f"現在のAIモデル: {model}")
+        
+        # メニューのラジオボタン状態を更新
+        self.model_var.set(model)
+        
+        # モデル変更後の説明を追加
+        if model == "gpt-5-mini":
+            self._add_to_status("GPT-5-mini: 高速で効率的な処理が可能です")
+        elif model == "gpt-5-nano":
+            self._add_to_status("GPT-5-nano: 超軽量で低コストな処理が可能です")
+    
+    def _check_model_availability(self, model):
+        """モデルの利用可能性を確認します。"""
+        try:
+            # 簡単なテストリクエストでモデルの存在を確認
+            test_client = OpenAI(api_key=self.config_manager.get('OPENAI_API_KEY'))
+            
+            # GPT-5モデルの場合はtemperatureを調整
+            temperature = 0.0
+            if model.startswith('gpt-5'):
+                temperature = 1.0
+                logger.info(f"GPT-5モデルのため、temperatureを1.0に調整: {model}")
+            
+            test_response = test_client.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "user", "content": "test"}
+                ],
+                max_tokens=1,
+                temperature=temperature
+            )
+            logger.info(f"モデル {model} の利用可能性確認: 成功")
+            return True
+        except Exception as e:
+            logger.warning(f"モデル {model} の利用可能性確認: 失敗 - {e}")
+            logger.warning(f"エラーの詳細: {traceback.format_exc()}")
+            return False
+    
+    def _check_current_model(self):
+        """現在のモデルの利用可能性を確認します。"""
+        current_model = self.config_manager.get('OPENAI_MODEL')
+        self._add_to_status(f"現在のモデル {current_model} の利用可能性を確認中...")
+        
+        if self._check_model_availability(current_model):
+            self._add_to_status(f"✓ {current_model} は利用可能です")
+            messagebox.showinfo("モデル確認", f"{current_model} は正常に利用できます。")
+        else:
+            self._add_to_status(f"✗ {current_model} は利用できません")
+            
+            # エラーの詳細をログから取得して表示
+            try:
+                # ログファイルから最新のエラー情報を取得
+                log_file = os.path.join(SCRIPT_DIR, "pdf_renamer.log")
+                if os.path.exists(log_file):
+                    with open(log_file, 'r', encoding='utf-8') as f:
+                        lines = f.readlines()
+                        # 最新のエラーログを探す
+                        for line in reversed(lines):
+                            if f"モデル {current_model} の利用可能性確認: 失敗" in line:
+                                # 次の行にエラーの詳細がある可能性
+                                error_details = []
+                                for i, log_line in enumerate(lines):
+                                    if f"モデル {current_model} の利用可能性確認: 失敗" in log_line:
+                                        # エラー行の前後数行を取得
+                                        start = max(0, i-2)
+                                        end = min(len(lines), i+3)
+                                        error_details = lines[start:end]
+                                        break
+                                
+                                if error_details:
+                                    error_text = "".join(error_details)
+                                    self._add_to_status("エラーの詳細:")
+                                    self._add_to_status(error_text.strip())
+                                break
+            except Exception as log_error:
+                logger.error(f"ログファイル読み込みエラー: {log_error}")
+            
+            # 一般的な原因と対処法を表示
+            self._add_to_status("")
+            self._add_to_status("AIモデルが利用できない一般的な原因:")
+            self._add_to_status("1. モデル名が間違っている (正しい名前: gpt-5-mini, gpt-5-nano)")
+            self._add_to_status("2. アカウントの利用制限")
+            self._add_to_status("3. APIキーの権限不足")
+            self._add_to_status("4. インターネット接続の問題")
+            self._add_to_status("5. GPT-5モデルはtemperature=1.0のみサポート")
+            self._add_to_status("")
+            self._add_to_status("対処法:")
+            self._add_to_status("- GPT-5-miniを使用する (推奨)")
+            self._add_to_status("- GPT-5-nanoを使用する (軽量)")
+            self._add_to_status("- OpenAIの公式サイトで利用可能なモデルを確認")
+            self._add_to_status("- APIキーの権限を確認")
+            self._add_to_status("- 利用可能モデル一覧で確認")
+            
+            messagebox.showwarning(
+                "モデル確認", 
+                f"{current_model} は利用できません。\n\n"
+                "詳細なエラー情報はステータス画面とログファイルを確認してください。\n\n"
+                "GPT-5-miniに切り替えることをお勧めします。\n"
+                "設定メニューから「AIモデル」→「GPT-5-mini (推奨)」を選択してください。"
+            )
+    
+    def _list_available_models(self):
+        """利用可能なモデルの一覧を表示します。"""
+        try:
+            self._add_to_status("利用可能なモデルを確認中...")
+            
+            # OpenAI APIから利用可能なモデル一覧を取得
+            client = OpenAI(api_key=self.config_manager.get('OPENAI_API_KEY'))
+            models = client.models.list()
+            
+            # 利用可能なモデルをフィルタリング（GPT系のみ）
+            gpt_models = []
+            for model in models.data:
+                if model.id.startswith('gpt-'):
+                    gpt_models.append(model.id)
+            
+            if gpt_models:
+                self._add_to_status("利用可能なGPTモデル:")
+                for model in sorted(gpt_models):
+                    self._add_to_status(f"  - {model}")
+                
+                # 推奨モデルを表示
+                self._add_to_status("")
+                self._add_to_status("推奨モデル:")
+                if "gpt-5-mini" in gpt_models:
+                    self._add_to_status("  - gpt-5-mini (高速・効率的)")
+                if "gpt-5-nano" in gpt_models:
+                    self._add_to_status("  - gpt-5-nano (超軽量・低コスト)")
+                if "gpt-4o" in gpt_models:
+                    self._add_to_status("  - gpt-4o (高品質)")
+                    
+            else:
+                self._add_to_status("利用可能なGPTモデルが見つかりませんでした")
+                self._add_to_status("APIキーまたはアカウントの設定を確認してください")
+                
+        except Exception as e:
+            error_msg = f"モデル一覧取得エラー: {str(e)}"
+            self._add_to_status(error_msg)
+            logger.error(error_msg)
+            
+            # 一般的なモデル名を表示
+            self._add_to_status("")
+            self._add_to_status("一般的なGPT-5モデル名:")
+            self._add_to_status("  - gpt-5-mini (軽量版・推奨)")
+            self._add_to_status("  - gpt-5-nano (超軽量版)")
+            self._add_to_status("  - gpt-4o (高品質版)")
+            self._add_to_status("  - gpt-4o-mini (軽量版)")
+            self._add_to_status("")
+            self._add_to_status("注意: GPT-5モデルはtemperature=1.0のみサポート")
+            self._add_to_status("正しいモデル名を使用してください")
+    
+
     def _save_rules(self):
         """ルールを保存します。"""
         try:
