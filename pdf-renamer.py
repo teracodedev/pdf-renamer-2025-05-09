@@ -40,6 +40,7 @@ import json
 import traceback
 import shutil
 import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================================
 # 設定とセットアップ
@@ -50,7 +51,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_ENV_PATH = SCRIPT_DIR / '.env'
 DEFAULT_YAML_PATH = SCRIPT_DIR / 'rename_rules.yaml'
 DEFAULT_IMAGE_PATH = SCRIPT_DIR / 'temp_images'
-APP_VERSION = "2025年6月4日バージョン（パフォーマンス最適化版・GPT-5対応）"
+APP_VERSION = "2025年6月4日バージョン（パフォーマンス最適化版・GPT-5対応・高速処理）"
 
 # ログの設定
 log_file_path = os.path.join(SCRIPT_DIR, "pdf-renamer.log")
@@ -235,8 +236,10 @@ class PDFProcessor:
         # パフォーマンス最適化のための設定
         self.image_cache = {}
         self.ocr_cache = {}
-        self.max_cache_size = 100  # キャッシュサイズの制限
-        self.dpi = 150  # DPIを200から150に下げて処理を高速化
+        self.max_cache_size = 200  # キャッシュサイズを増加
+        self.dpi = 120  # DPIをさらに下げて処理を高速化
+        self.thread_pool_size = 2  # 並列処理のスレッド数
+        self.batch_size = 3  # バッチ処理サイズ
         
         logger.debug("PDFProcessorを初期化しました")
         logger.debug(f"選択された担当者: {selected_person}")
@@ -333,19 +336,31 @@ class PDFProcessor:
             logger.info(f"PDF→画像変換完了: {pdf_time:.2f}秒")
             if not image_paths:
                 raise Exception("PDFの画像変換に失敗しました")
-            # OCR処理を順次実行
+            # OCR処理を並列実行（最適化版）
             ocr_start = time.time()
             ocr_results = []
-            for i, path in enumerate(image_paths):
-                logger.info(f"OCR処理開始 ({i+1}/{len(image_paths)}): {os.path.basename(path)}")
-                step_start = time.time()
-                result = self._ocr_jpeg(path)
-                step_time = time.time() - step_start
-                if result:
-                    ocr_results.append(result)
-                    logger.info(f"OCR処理成功 ({i+1}/{len(image_paths)}) ({step_time:.2f}秒)")
-                else:
-                    logger.warning(f"OCR処理失敗 ({i+1}/{len(image_paths)}) ({step_time:.2f}秒)")
+            
+            # 並列処理でOCRを実行
+            with ThreadPoolExecutor(max_workers=self.thread_pool_size) as executor:
+                # 各画像のOCR処理を並列で実行
+                future_to_path = {
+                    executor.submit(self._ocr_jpeg, path): path 
+                    for path in image_paths
+                }
+                
+                # 結果を順次取得
+                for i, future in enumerate(as_completed(future_to_path)):
+                    path = future_to_path[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            ocr_results.append(result)
+                            logger.info(f"OCR処理成功 ({i+1}/{len(image_paths)}): {os.path.basename(path)}")
+                        else:
+                            logger.warning(f"OCR処理失敗 ({i+1}/{len(image_paths)}): {os.path.basename(path)}")
+                    except Exception as e:
+                        logger.error(f"OCR処理エラー ({i+1}/{len(image_paths)}): {os.path.basename(path)} - {e}")
+            
             ocr_time = time.time() - ocr_start
             logger.info(f"OCR処理完了: {ocr_time:.2f}秒")
             if not ocr_results:
@@ -458,6 +473,10 @@ class PDFProcessor:
                         logger.error(f"個別ファイル削除エラー: {cleanup_error}")
             cleanup_time = time.time() - cleanup_start
             logger.info(f"一時ファイル削除完了: {cleanup_time:.2f}秒")
+            
+            # メモリクリーンアップ
+            gc.collect()
+            
             total_time = time.time() - start_time
             logger.info(f"[END] PDF処理: {os.path.basename(pdf_file_path)} (終了時刻: {time.strftime('%H:%M:%S')}) (総処理時間: {total_time:.2f}秒)")
             logger.info("==============================\n")
@@ -469,14 +488,16 @@ class PDFProcessor:
             if pdf_file_path in self.image_cache:
                 return self.image_cache[pdf_file_path]
 
-            # 最初の1ページのみ変換
+            # 最初の1ページのみ変換（最適化設定）
             images = convert_from_path(
                 pdf_file_path,
                 poppler_path=self.config_manager.get('POPPLER_PATH'),
                 dpi=self.dpi,  # DPIを下げて処理を高速化
-                thread_count=1,  # 並列処理を無効化（安定性重視）
+                thread_count=2,  # 並列処理を有効化（パフォーマンス向上）
                 first_page=1,
-                last_page=1
+                last_page=1,
+                fmt='jpeg',  # フォーマットを明示的に指定
+                jpegopt={'quality': 60, 'optimize': True}  # JPEG品質を最適化
             )
             
             image_paths = []
@@ -485,13 +506,15 @@ class PDFProcessor:
                     self.config_manager.get('IMAGE_FILE_PATH'),
                     f"temp_{int(time.time() * 1000)}_{os.getpid()}_{i}.jpg"
                 )
-                # 画像の圧縮率を上げてファイルサイズを削減
-                image.save(image_path, "JPEG", quality=70, optimize=True)
+                # 画像の圧縮率を上げてファイルサイズを削減（さらに最適化）
+                image.save(image_path, "JPEG", quality=60, optimize=True, progressive=True)
                 image_paths.append(image_path)
             
-            # キャッシュに保存
+            # キャッシュに保存（LRU方式で最適化）
             if len(self.image_cache) >= self.max_cache_size:
-                self.image_cache.clear()  # キャッシュが大きすぎる場合はクリア
+                # 最も古いエントリを削除
+                oldest_key = next(iter(self.image_cache))
+                del self.image_cache[oldest_key]
             self.image_cache[pdf_file_path] = image_paths
                 
             return image_paths
@@ -514,8 +537,10 @@ class PDFProcessor:
                 content = image_file.read()
                 
             image = vision.Image(content=content)
-            vision_client = vision.ImageAnnotatorClient()  # ←毎回新規生成
-            response = vision_client.text_detection(
+            # Visionクライアントを再利用（毎回新規生成を避ける）
+            if not hasattr(self, '_vision_client'):
+                self._vision_client = vision.ImageAnnotatorClient()
+            response = self._vision_client.text_detection(
                 image=image,
                 image_context={"language_hints": ["ja"]}  # 日本語を優先
             )
@@ -527,9 +552,11 @@ class PDFProcessor:
             if response.text_annotations:
                 result = response.text_annotations[0].description
             
-            # キャッシュに保存
+            # キャッシュに保存（LRU方式で最適化）
             if len(self.ocr_cache) >= self.max_cache_size:
-                self.ocr_cache.clear()  # キャッシュが大きすぎる場合はクリア
+                # 最も古いエントリを削除
+                oldest_key = next(iter(self.ocr_cache))
+                del self.ocr_cache[oldest_key]
             self.ocr_cache[image_path] = result
             
             ocr_time = time.time() - start_time
@@ -784,21 +811,38 @@ class PDFProcessor:
         return result['success']
             
     def _cleanup_temp_files(self, file_paths):
-        """一時ファイルを削除します。"""
+        """一時ファイルを削除します（最適化版）。"""
+        # バッチ削除でパフォーマンス向上
+        temp_dir = self.config_manager.get('IMAGE_FILE_PATH')
+        files_to_remove = []
+        
+        # 指定されたファイルパスを削除対象に追加
         for path in file_paths:
+            if path and os.path.exists(path):
+                files_to_remove.append(path)
+        
+        # temp_imagesディレクトリ内の古い一時ファイルも削除対象に追加
+        try:
+            if os.path.exists(temp_dir):
+                for file in os.listdir(temp_dir):
+                    if file.startswith('temp_') and file.endswith('.jpg'):
+                        file_path = os.path.join(temp_dir, file)
+                        # ファイルの作成時刻をチェック（1時間以上古いファイルのみ削除）
+                        if os.path.exists(file_path):
+                            file_age = time.time() - os.path.getctime(file_path)
+                            if file_age > 3600:  # 1時間
+                                files_to_remove.append(file_path)
+        except Exception as e:
+            logger.error(f"一時ファイル一覧取得エラー: {e}")
+        
+        # バッチ削除実行
+        for file_path in files_to_remove:
             try:
-                if path and os.path.exists(path):
-                    os.remove(path)
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                    logger.debug(f"一時ファイル削除: {os.path.basename(file_path)}")
             except Exception as e:
                 logger.error(f"一時ファイル削除エラー: {e}")
-        # temp_imagesディレクトリ内の残骸も削除
-        temp_dir = self.config_manager.get('IMAGE_FILE_PATH')
-        for file in os.listdir(temp_dir):
-            if file.startswith('temp_') and file.endswith('.jpg'):
-                try:
-                    os.remove(os.path.join(temp_dir, file))
-                except Exception as e:
-                    logger.error(f"一時ファイル削除エラー: {e}")
 
 class PDFRenamerApp:
     """PDFリネーマーのGUIアプリケーション。"""
@@ -816,8 +860,10 @@ class PDFRenamerApp:
         self.processing_complete = False
         
         # パフォーマンス最適化のための設定
-        self.status_update_interval = 50  # ステータス更新間隔（ミリ秒）を短縮
+        self.status_update_interval = 30  # ステータス更新間隔（ミリ秒）をさらに短縮
         self.processing_queue = queue.Queue()  # 処理キュー
+        self.status_batch_size = 10  # ステータスメッセージのバッチサイズ
+        self.last_status_update = 0  # 最後のステータス更新時刻
         
         self._setup_ui()
         self._validate_config_on_startup()
@@ -1006,10 +1052,13 @@ class PDFRenamerApp:
         self.root.update_idletasks()
         
     def _poll_status_queue(self):
-        """ステータスキューを監視します。"""
+        """ステータスキューを監視します（最適化版）。"""
         try:
             messages = []
-            while True:
+            current_time = time.time()
+            
+            # バッチサイズまたは時間間隔でメッセージを取得
+            while len(messages) < self.status_batch_size:
                 try:
                     message = self.status_queue.get_nowait()
                     messages.append(message)
@@ -1017,12 +1066,19 @@ class PDFRenamerApp:
                     break
             
             if messages:
-                # メッセージをまとめて追加
+                # メッセージをまとめて追加（バッチ処理）
                 timestamp = datetime.now().strftime("%H:%M:%S")
+                batch_text = ""
                 for message in messages:
-                    self.status_text.insert(tk.END, f"[{timestamp}] {message}\n")
+                    batch_text += f"[{timestamp}] {message}\n"
+                
+                self.status_text.insert(tk.END, batch_text)
                 self.status_text.see(tk.END)
-                self.root.update_idletasks()
+                
+                # UI更新を最適化（必要時のみ）
+                if current_time - self.last_status_update > 0.1:  # 100ms間隔
+                    self.root.update_idletasks()
+                    self.last_status_update = current_time
             
             # 処理完了の検知とUI更新（重複を避けるため簡素化）
             if not self.is_processing and self.processing_complete:
@@ -1050,7 +1106,7 @@ class PDFRenamerApp:
             logger.error(f"ステータスキュー処理エラー: {e}")
         finally:
             # 処理中の場合は短い間隔で、そうでなければ長い間隔で監視
-            interval = self.status_update_interval if self.is_processing else 500
+            interval = self.status_update_interval if self.is_processing else 200
             self.root.after(interval, self._poll_status_queue)
             
     def _validate_config_on_startup(self):
@@ -1198,6 +1254,11 @@ class PDFRenamerApp:
                         progress_percent, completed, successful, total_files
                     ))
                     
+                    # 定期的なメモリクリーンアップ（5ファイルごと）
+                    if completed % 5 == 0:
+                        gc.collect()
+                        logger.debug(f"メモリクリーンアップ実行: {completed}/{total_files} ファイル処理完了")
+                    
         except Exception as e:
             logger.error(f"処理全体のエラー: {e}")
             self.status_queue.put(f"処理エラー: {str(e)}")
@@ -1336,12 +1397,15 @@ AIモデル設定:
 - 処理中に「処理を停止」ボタンで中断できます
 
 修正点（パフォーマンス最適化版）:
-- DPIを150に下げてPDF→画像変換を高速化
-- 画像保存のqualityを70に下げてファイルサイズ削減
-- 順次処理による安定性向上（API制限回避）
-- PDFProcessorインスタンスの共有
-- 詳細なログ出力によるデバッグ機能
-- UI応答性の改善
+- DPIを120に下げてPDF→画像変換を高速化
+- 画像保存のqualityを60に下げてファイルサイズ削減
+- 並列処理によるOCR処理の高速化（ThreadPoolExecutor使用）
+- LRUキャッシュ方式によるメモリ効率の改善
+- 定期的なガベージコレクションによるメモリ管理
+- バッチ処理によるUI応答性の向上
+- Visionクライアントの再利用によるAPI呼び出し最適化
+- 一時ファイルの効率的な管理
+- ステータス更新の最適化（バッチ処理）
 - GPT-5-miniとGPT-5-nanoの選択可能
 - モデル選択機能を有効化
         """
