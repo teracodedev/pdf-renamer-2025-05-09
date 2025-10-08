@@ -1446,14 +1446,25 @@ AIモデル設定:
                 temperature = 1.0
                 logger.info(f"GPT-5モデルのため、temperatureを1.0に調整: {model}")
             
-            test_response = test_client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "user", "content": "test"}
-                ],
-                max_tokens=1,
-                temperature=temperature
-            )
+            # GPT-5モデルの場合はmax_completion_tokensを使用
+            if model.startswith('gpt-5'):
+                test_response = test_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "user", "content": "test"}
+                    ],
+                    max_completion_tokens=10,
+                    temperature=temperature
+                )
+            else:
+                test_response = test_client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "user", "content": "test"}
+                    ],
+                    max_tokens=1,
+                    temperature=temperature
+                )
             logger.info(f"モデル {model} の利用可能性確認: 成功")
             return True
         except Exception as e:
