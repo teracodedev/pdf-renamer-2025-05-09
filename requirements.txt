@@ -1,0 +1,7 @@
+pdf2image
+google-cloud-vision
+openai
+pyyaml
+python-dotenv
+Pillow
+pytesseract
