@@ -1015,6 +1015,7 @@ class PDFRenamerApp:
         rules_menu = tk.Menu(menubar, tearoff=0)
         menubar.add_cascade(label="ルール", menu=rules_menu)
         rules_menu.add_command(label="ルールの保存", command=self._save_rules)
+        rules_menu.add_command(label="ルールの読み込み", command=self._load_rules)
         rules_menu.add_command(label="環境変数の保存", command=self._save_env_vars)
         
         # ヘルプメニュー
@@ -1591,16 +1592,22 @@ AIモデル設定:
         try:
             # デフォルトのファイル名を生成
             timestamp = datetime.now().strftime("%Y年%m月%d日%H時%M分%S秒")
-            default_filename = f"rename_rules.yaml.backup({timestamp})"
+            default_filename = f"rename_rules.backup({timestamp}).yaml"
             
             # ファイル保存ダイアログを表示
             file_path = filedialog.asksaveasfilename(
                 initialfile=default_filename,
-                filetypes=[("YAML files", "*.yaml"), ("All files", "*.*")],
+                filetypes=[("YAML files", "*.yaml"), ("YAML files", "*.yml"), ("All files", "*.*")],
                 title="ルールファイルの保存"
             )
             
             if file_path:
+                # 拡張子がない場合や.ymlの場合は.yamlに変更
+                if not file_path.endswith('.yaml') and not file_path.endswith('.yml'):
+                    file_path += '.yaml'
+                elif file_path.endswith('.yml'):
+                    file_path = file_path[:-4] + '.yaml'
+                
                 # 現在のルールを読み込む
                 with open(self.config_manager.get('YAML_FILE'), 'r', encoding='utf-8') as source:
                     rules_content = source.read()
@@ -1616,6 +1623,59 @@ AIモデル設定:
                 
         except Exception as e:
             error_msg = f"ルールの保存中にエラーが発生しました: {str(e)}"
+            logger.error(error_msg)
+            self._add_to_status(error_msg)
+            messagebox.showerror("エラー", error_msg)
+    
+    def _load_rules(self):
+        """ルールを読み込みます。"""
+        try:
+            # ファイル選択ダイアログを表示
+            file_path = filedialog.askopenfilename(
+                filetypes=[("YAML files", "*.yaml"), ("YAML files", "*.yml"), ("All files", "*.*")],
+                title="ルールファイルの読み込み"
+            )
+            
+            if file_path:
+                # バックアップを作成
+                backup_path = self.config_manager.get('YAML_FILE') + '.backup'
+                with open(self.config_manager.get('YAML_FILE'), 'r', encoding='utf-8') as current:
+                    current_content = current.read()
+                
+                with open(backup_path, 'w', encoding='utf-8') as backup:
+                    backup.write(current_content)
+                
+                self._add_to_status(f"現在のルールをバックアップしました: {os.path.basename(backup_path)}")
+                
+                # 選択したファイルを読み込んでコピー
+                with open(file_path, 'r', encoding='utf-8') as source:
+                    rules_content = source.read()
+                
+                # 現在のルールファイルに保存
+                with open(self.config_manager.get('YAML_FILE'), 'w', encoding='utf-8') as target:
+                    target.write(rules_content)
+                
+                # YAMLの形式を検証
+                try:
+                    yaml.safe_load(rules_content)
+                    self._add_to_status(f"ルールを読み込みました: {os.path.basename(file_path)}")
+                    messagebox.showinfo("読み込み完了", f"ルールを読み込みました:\n{file_path}\n\n現在のルールは {os.path.basename(backup_path)} にバックアップされています。")
+                except yaml.YAMLError as yaml_error:
+                    # YAML形式が無効な場合、バックアップから復元
+                    with open(backup_path, 'r', encoding='utf-8') as backup:
+                        backup_content = backup.read()
+                    with open(self.config_manager.get('YAML_FILE'), 'w', encoding='utf-8') as target:
+                        target.write(backup_content)
+                    
+                    error_msg = f"YAMLファイルの形式が正しくありません: {str(yaml_error)}"
+                    logger.error(error_msg)
+                    self._add_to_status(error_msg)
+                    messagebox.showerror("エラー", error_msg + "\nルールを復元しました。")
+            else:
+                self._add_to_status("ルールの読み込みをキャンセルしました")
+                
+        except Exception as e:
+            error_msg = f"ルールの読み込み中にエラーが発生しました: {str(e)}"
             logger.error(error_msg)
             self._add_to_status(error_msg)
             messagebox.showerror("エラー", error_msg)
