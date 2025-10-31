@@ -387,59 +387,65 @@ class PDFProcessor:
             # ファイルのリネーム
             if new_name:
                 rename_start = time.time()
-                rename_success = self._rename_pdf(work_pdf_path, new_name)
-                rename_time = time.time() - rename_start
-                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: {rename_success})")
-                if rename_success:
-                    # 元のディレクトリに移動（Windowsエクスプローラーと同じルールで連番を付ける）
-                    ext = os.path.splitext(pdf_file_path)[1]
-                    base_filename = f"{new_name}{ext}"
-                    
-                    # Windowsエクスプローラーと同じルールでユニークなファイル名を生成
-                    unique_filename = self._get_unique_filename(pdf_file_path, base_filename)
-                    new_final_path = os.path.join(os.path.dirname(pdf_file_path), unique_filename)
-                    logger.info(f"リネーム後のファイルを元の場所に移動: {new_final_path}")
-                    
-                    # リネーム前とリネーム後のファイル名が同じ場合はスキップ
-                    if os.path.basename(pdf_file_path) == unique_filename:
-                        logger.info(f"ファイル名が同じなので移動処理をスキップ: {os.path.basename(pdf_file_path)}")
-                        # ファイル名が同じでも、一時ディレクトリのファイルを元の場所に移動して元ファイルを置き換える
-                        temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
-                        if os.path.exists(temp_file_path):
-                            # 既存ファイルがあれば削除
-                            if os.path.exists(new_final_path):
-                                try:
-                                    os.remove(new_final_path)
-                                    logger.info(f"既存ファイルを削除しました: {new_final_path}")
-                                except OSError as e:
-                                    logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
-                            # 一時ファイルを元の場所に移動
-                            shutil.move(temp_file_path, new_final_path)
-                            logger.info(f"一時ファイルを元の場所に移動しました: {new_final_path}")
-                            # 元のファイルの削除は不要（shutil.moveで既に移動済み）
-                        return True
-                    
-                    # 一時ファイルを元の場所に移動（上書きではなく、ユニークな名前で保存）
+                # 元のディレクトリに移動（Windowsエクスプローラーと同じルールで連番を付ける）
+                ext = os.path.splitext(pdf_file_path)[1]
+                base_filename = f"{new_name}{ext}"
+                
+                # Windowsエクスプローラーと同じルールでユニークなファイル名を生成
+                unique_filename = self._get_unique_filename(pdf_file_path, base_filename)
+                new_final_path = os.path.join(os.path.dirname(pdf_file_path), unique_filename)
+                logger.info(f"リネーム後のファイルを元の場所に移動: {new_final_path}")
+                
+                # リネーム前とリネーム後のファイル名が同じ場合はスキップ
+                if os.path.basename(pdf_file_path) == unique_filename:
+                    logger.info(f"ファイル名が同じなので移動処理をスキップ: {os.path.basename(pdf_file_path)}")
+                    # ファイル名が同じでも、一時ディレクトリのファイルを元の場所に移動して元ファイルを置き換える
                     temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
                     if os.path.exists(temp_file_path):
-                        shutil.move(temp_file_path, new_final_path)
-                        logger.info(f"リネーム後のファイルを移動しました: {new_final_path}")
-                        
-                        # 元のファイルを削除
-                        if os.path.exists(pdf_file_path):
+                        # 既存ファイルがあれば削除
+                        if os.path.exists(new_final_path):
                             try:
-                                os.remove(pdf_file_path)
-                                logger.info(f"元のファイルを削除しました: {pdf_file_path}")
+                                os.remove(new_final_path)
+                                logger.info(f"既存ファイルを削除しました: {new_final_path}")
                             except OSError as e:
-                                logger.error(f"元のファイル削除に失敗しました: {e}")
-                                self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
-                        else:
-                            logger.warning(f"元のファイルが見つかりません: {pdf_file_path}")
-                    else:
-                        logger.warning(f"一時ファイルが見つかりません: {temp_file_path}")
+                                logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
+                        # 一時ファイルを元の場所に移動
+                        shutil.move(temp_file_path, new_final_path)
+                        logger.info(f"一時ファイルを元の場所に移動しました: {new_final_path}")
+                        # 元のファイルの削除は不要（shutil.moveで既に移動済み）
+                    rename_time = time.time() - rename_start
+                    logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: True)")
+                    return True
+                
+                # 一時ファイルをリネーム
+                temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
+                if os.path.exists(work_pdf_path):
+                    shutil.move(work_pdf_path, temp_file_path)
+                    logger.info(f"一時ファイルをリネームしました: {os.path.basename(work_pdf_path)} -> {new_name}{ext}")
+                
+                # 元のディレクトリに移動（上書きではなく、ユニークな名前で保存）
+                if os.path.exists(temp_file_path):
+                    shutil.move(temp_file_path, new_final_path)
+                    logger.info(f"リネーム後のファイルを移動しました: {new_final_path}")
                     
+                    # 元のファイルを削除
+                    if os.path.exists(pdf_file_path):
+                        try:
+                            os.remove(pdf_file_path)
+                            logger.info(f"元のファイルを削除しました: {pdf_file_path}")
+                        except OSError as e:
+                            logger.error(f"元のファイル削除に失敗しました: {e}")
+                            self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
+                    else:
+                        logger.warning(f"元のファイルが見つかりません: {pdf_file_path}")
+                    
+                    rename_time = time.time() - rename_start
+                    logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: True)")
                     return True
                 else:
+                    logger.warning(f"一時ファイルが見つかりません: {temp_file_path}")
+                    rename_time = time.time() - rename_start
+                    logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: False)")
                     return False
             return False
         except Exception as e:
