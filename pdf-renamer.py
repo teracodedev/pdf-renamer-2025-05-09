@@ -33,6 +33,7 @@ from pdf2image.exceptions import PDFInfoNotInstalledError, PDFPageCountError
 from google.cloud import vision
 import google.api_core.exceptions
 from openai import OpenAI
+from openai import RateLimitError, APIStatusError
 import pytesseract
 from PIL import Image
 import pdf2image
@@ -295,7 +296,7 @@ class PDFProcessor:
             try:
                 pattern = rule.get('正規表現', '')
                 if pattern:
-                    if re.search(pattern, ocr_text, re.IGNORECASE):
+                    if re.search(pattern, ocr_text, re.IGNORECASE | re.DOTALL):
                         applicable_rules.append(rule)
             except Exception as e:
                 error_msg = f"ルール適用エラー: {rule.get('説明', '説明なし')} - {str(e)}"
@@ -674,6 +675,11 @@ class PDFProcessor:
                 logger.error(f"OpenAI API呼び出しエラー: {api_error}")
                 logger.error(f"エラータイプ: {type(api_error).__name__}")
                 
+                # 429 insufficient_quota の場合はフォールバックしても同じエラーになるのでスキップ
+                api_error_str = str(api_error).lower()
+                if "insufficient_quota" in api_error_str or "exceeded your current quota" in api_error_str:
+                    raise api_error
+                
                 # GPT-5-nanoが利用できない場合はGPT-5-miniにフォールバック
                 if current_model == "gpt-5-nano":
                     logger.warning("GPT-5-nanoが利用できません。GPT-5-miniにフォールバックします。")
@@ -718,14 +724,29 @@ class PDFProcessor:
             logger.error(f"OpenAI APIエラー: {e} ({ai_time:.2f}秒)")
             logger.error(f"エラーの詳細: {traceback.format_exc()}")
             
-            # エラーメッセージをステータスキューに送信
-            error_msg = f"AI処理エラー: {str(e)}"
-            self.status_queue.put(error_msg)
-            
-            # モデルが利用できない場合の追加情報
-            if "model" in str(e).lower() or "not found" in str(e).lower():
-                self.status_queue.put("ヒント: 選択したAIモデルが利用できない可能性があります")
-                self.status_queue.put("設定メニューから別のモデルを試してください")
+            # 429 insufficient_quota エラーの場合：APIクォータ超過
+            error_str = str(e).lower()
+            is_quota_error = (
+                (isinstance(e, (RateLimitError, APIStatusError)) and getattr(e, 'status_code', None) == 429) or
+                "insufficient_quota" in error_str or
+                "exceeded your current quota" in error_str
+            )
+            if is_quota_error:
+                self.status_queue.put("【重要】OpenAI APIの利用枠を超過しました（Error 429: insufficient_quota）")
+                self.status_queue.put("")
+                self.status_queue.put("対処方法:")
+                self.status_queue.put("1. https://platform.openai.com/account/billing で支払い設定を確認")
+                self.status_queue.put("2. 無料枠が期限切れの場合、支払い方法を追加して有料プランへ")
+                self.status_queue.put("3. APIキーが正しいアカウントのものか確認")
+                self.status_queue.put("4. 利用状況: https://platform.openai.com/usage で確認")
+            else:
+                # その他のエラー
+                error_msg = f"AI処理エラー: {str(e)}"
+                self.status_queue.put(error_msg)
+                # モデルが利用できない場合の追加情報
+                if "model" in error_str or "not found" in error_str:
+                    self.status_queue.put("ヒント: 選択したAIモデルが利用できない可能性があります")
+                    self.status_queue.put("設定メニューから別のモデルを試してください")
             
             return None
         finally:
