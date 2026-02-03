@@ -637,16 +637,28 @@ class PDFProcessor:
                     {{"filename": "生成されたファイル名", "used_rule": "名刺読み取りモード"}}
                     """
             else:
-                # 通常のプロンプト：ルール内の {担当者} と {今日の日付} を実際の値に置換してから渡す（治療を受けた人の名前等が確実に含まれるようにする）
-                rules_for_prompt = []
-                for rule in applicable_rules:
-                    r = dict(rule)
-                    for key in ('プロンプト', '命名ルール'):
-                        if key in r and isinstance(r[key], str):
-                            r[key] = r[key].replace('{担当者}', self.selected_person)
-                            r[key] = r[key].replace('{今日の日付}', current_date)
-                    rules_for_prompt.append(r)
-                prompt = f"""
+                # 最優先ルールに {ocr_result} を含むプロンプトがある場合（医療費領収書など）は、そのルールのプロンプトをプレースホルダー置換して直接使用（治療を受けた人の名前を確実に末尾に付けるため）
+                first_rule = applicable_rules[0] if applicable_rules else None
+                rule_prompt_template = first_rule.get('プロンプト', '') if first_rule else ''
+                if rule_prompt_template and '{ocr_result}' in rule_prompt_template:
+                    naming_rule = (first_rule.get('命名ルール') or '').replace('{担当者}', self.selected_person)
+                    prompt = rule_prompt_template.replace('{ocr_result}', ocr_text)
+                    prompt = prompt.replace('{担当者}', self.selected_person)
+                    prompt = prompt.replace('{今日の日付}', current_date)
+                    prompt = prompt.replace('{命名ルール}', naming_rule)
+                    prompt = prompt.replace('{書類の種類}', first_rule.get('書類の種類', ''))
+                    logger.info(f"最優先ルールのプロンプトを直接使用: {first_rule.get('説明', '')}")
+                else:
+                    # 通常のプロンプト：ルール内の {担当者} と {今日の日付} を実際の値に置換してから渡す
+                    rules_for_prompt = []
+                    for rule in applicable_rules:
+                        r = dict(rule)
+                        for key in ('プロンプト', '命名ルール'):
+                            if key in r and isinstance(r[key], str):
+                                r[key] = r[key].replace('{担当者}', self.selected_person)
+                                r[key] = r[key].replace('{今日の日付}', current_date)
+                        rules_for_prompt.append(r)
+                    prompt = f"""
                 以下のOCR結果から、適切なファイル名を生成してください。
                 
                 OCR結果:
