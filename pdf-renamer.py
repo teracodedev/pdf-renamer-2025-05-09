@@ -637,7 +637,15 @@ class PDFProcessor:
                     {{"filename": "生成されたファイル名", "used_rule": "名刺読み取りモード"}}
                     """
             else:
-                # 通常のプロンプト
+                # 通常のプロンプト：ルール内の {担当者} と {今日の日付} を実際の値に置換してから渡す（治療を受けた人の名前等が確実に含まれるようにする）
+                rules_for_prompt = []
+                for rule in applicable_rules:
+                    r = dict(rule)
+                    for key in ('プロンプト', '命名ルール'):
+                        if key in r and isinstance(r[key], str):
+                            r[key] = r[key].replace('{担当者}', self.selected_person)
+                            r[key] = r[key].replace('{今日の日付}', current_date)
+                    rules_for_prompt.append(r)
                 prompt = f"""
                 以下のOCR結果から、適切なファイル名を生成してください。
                 
@@ -645,10 +653,10 @@ class PDFProcessor:
                 {ocr_text}
                 
                 現在の日付: {current_date}
-                担当者: {self.selected_person}
+                担当者（治療を受けた人・領収書の対象者）: {self.selected_person}
                 
-                以下の適用可能なルールに従ってファイル名を生成してください：
-                {json.dumps(applicable_rules, ensure_ascii=False, indent=2)}
+                以下の適用可能なルールに従ってファイル名を生成してください。ルールに「（担当者）」「（治療を受けた人）」などとある場合は、必ず上記の担当者名を括弧内に含めてください。
+                {json.dumps(rules_for_prompt, ensure_ascii=False, indent=2)}
                 
                 以下の形式でJSONを返してください：
                 {{"filename": "生成されたファイル名", "used_rule": "使用したルールの説明"}}
