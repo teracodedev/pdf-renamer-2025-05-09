@@ -637,27 +637,33 @@ class PDFProcessor:
                     {{"filename": "生成されたファイル名", "used_rule": "名刺読み取りモード"}}
                     """
             else:
-                # 最優先ルールに {ocr_result} を含むプロンプトがある場合（医療費領収書など）は、そのルールのプロンプトをプレースホルダー置換して直接使用（治療を受けた人の名前を確実に末尾に付けるため）
-                first_rule = applicable_rules[0] if applicable_rules else None
-                rule_prompt_template = first_rule.get('プロンプト', '') if first_rule else ''
+                if not applicable_rules:
+                    return None
+
+                selected_rule = applicable_rules[0]
+                rule_description = selected_rule.get('説明', '説明なし')
+                rule_prompt_template = selected_rule.get('プロンプト', '')
+
                 if rule_prompt_template and '{ocr_result}' in rule_prompt_template:
-                    naming_rule = (first_rule.get('命名ルール') or '').replace('{担当者}', self.selected_person)
+                    naming_rule = (selected_rule.get('命名ルール') or '').replace('{担当者}', self.selected_person)
                     prompt = rule_prompt_template.replace('{ocr_result}', ocr_text)
                     prompt = prompt.replace('{担当者}', self.selected_person)
                     prompt = prompt.replace('{今日の日付}', current_date)
                     prompt = prompt.replace('{命名ルール}', naming_rule)
-                    prompt = prompt.replace('{書類の種類}', first_rule.get('書類の種類', ''))
-                    logger.info(f"最優先ルールのプロンプトを直接使用: {first_rule.get('説明', '')}")
+                    prompt = prompt.replace('{書類の種類}', selected_rule.get('書類の種類', ''))
+                    prompt += f"""
+
+以下の形式でJSONを返してください：
+{{"filename": "生成されたファイル名", "used_rule": "{rule_description}"}}
+"""
+                    logger.info(f"優先度最高のルール専用プロンプトを使用: {rule_description}")
+                    self.status_queue.put(f"適用ルール: {rule_description}")
                 else:
-                    # 通常のプロンプト：ルール内の {担当者} と {今日の日付} を実際の値に置換してから渡す
-                    rules_for_prompt = []
-                    for rule in applicable_rules:
-                        r = dict(rule)
-                        for key in ('プロンプト', '命名ルール'):
-                            if key in r and isinstance(r[key], str):
-                                r[key] = r[key].replace('{担当者}', self.selected_person)
-                                r[key] = r[key].replace('{今日の日付}', current_date)
-                        rules_for_prompt.append(r)
+                    r = dict(selected_rule)
+                    for key in ('プロンプト', '命名ルール'):
+                        if key in r and isinstance(r[key], str):
+                            r[key] = r[key].replace('{担当者}', self.selected_person)
+                            r[key] = r[key].replace('{今日の日付}', current_date)
                     prompt = f"""
                 以下のOCR結果から、適切なファイル名を生成してください。
                 
@@ -667,12 +673,14 @@ class PDFProcessor:
                 現在の日付: {current_date}
                 担当者（治療を受けた人・領収書の対象者）: {self.selected_person}
                 
-                以下の適用可能なルールに従ってファイル名を生成してください。ルールに「（担当者）」「（治療を受けた人）」などとある場合は、必ず上記の担当者名を括弧内に含めてください。
-                {json.dumps(rules_for_prompt, ensure_ascii=False, indent=2)}
+                以下のルールに従ってファイル名を生成してください。ルールに「（担当者）」「（治療を受けた人）」などとある場合は、必ず上記の担当者名を括弧内に含めてください。
+                {json.dumps(r, ensure_ascii=False, indent=2)}
                 
                 以下の形式でJSONを返してください：
-                {{"filename": "生成されたファイル名", "used_rule": "使用したルールの説明"}}
+                {{"filename": "生成されたファイル名", "used_rule": "{rule_description}"}}
                 """
+                    logger.info(f"最優先ルールを適用: {rule_description}")
+                    self.status_queue.put(f"適用ルール: {rule_description}")
             
             # OpenAI APIにリクエスト
             try:
