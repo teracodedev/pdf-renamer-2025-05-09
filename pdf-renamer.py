@@ -313,6 +313,13 @@ class PDFProcessor:
             logger.warning("適用可能なルールが見つかりませんでした")
         
         return applicable_rules
+
+    def _get_other_documents_rule(self):
+        """その他の書類のリネームルールを取得します。"""
+        for rule in self.rules:
+            if rule.get('説明') == "その他の書類のリネームルール":
+                return rule
+        return None
             
     def process_pdf(self, pdf_file_path):
         """PDFファイルを処理し、新しいファイル名を生成します。"""
@@ -378,6 +385,17 @@ class PDFProcessor:
             # ChatGPT-4でファイル名を生成
             ai_start = time.time()
             new_name = self._generate_filename_with_gpt4(combined_ocr, work_pdf_path, applicable_rules)
+            # 専用ルールで失敗した場合は「その他の書類」ルールで再試行
+            if not new_name:
+                other_rule = self._get_other_documents_rule()
+                used_other_already = (
+                    applicable_rules
+                    and applicable_rules[0].get('説明') == "その他の書類のリネームルール"
+                )
+                if other_rule and not used_other_already:
+                    logger.info("専用ルールでファイル名生成に失敗したため、その他の書類ルールで再試行します")
+                    self.status_queue.put("その他の書類ルールで再試行します")
+                    new_name = self._generate_filename_with_gpt4(combined_ocr, work_pdf_path, [other_rule])
             ai_time = time.time() - ai_start
             logger.info(f"AI処理完了: {ai_time:.2f}秒")
             # 担当者が「該当者なし」の場合は（該当者なし）を除去
@@ -386,69 +404,72 @@ class PDFProcessor:
             # ファイル名の正規化
             new_name = self._normalize_filename(new_name)
             # ファイルのリネーム
-            if new_name:
-                rename_start = time.time()
-                # 元のディレクトリに移動（Windowsエクスプローラーと同じルールで連番を付ける）
-                ext = os.path.splitext(pdf_file_path)[1]
-                base_filename = f"{new_name}{ext}"
-                
-                # Windowsエクスプローラーと同じルールでユニークなファイル名を生成
-                unique_filename = self._get_unique_filename(pdf_file_path, base_filename)
-                new_final_path = os.path.join(os.path.dirname(pdf_file_path), unique_filename)
-                logger.info(f"リネーム後のファイルを元の場所に移動: {new_final_path}")
-                
-                # リネーム前とリネーム後のファイル名が同じ場合はスキップ
-                if os.path.basename(pdf_file_path) == unique_filename:
-                    logger.info(f"ファイル名が同じなので移動処理をスキップ: {os.path.basename(pdf_file_path)}")
-                    # ファイル名が同じでも、一時ディレクトリのファイルを元の場所に移動して元ファイルを置き換える
-                    temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
-                    if os.path.exists(temp_file_path):
-                        # 既存ファイルがあれば削除
-                        if os.path.exists(new_final_path):
-                            try:
-                                os.remove(new_final_path)
-                                logger.info(f"既存ファイルを削除しました: {new_final_path}")
-                            except OSError as e:
-                                logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
-                        # 一時ファイルを元の場所に移動
-                        shutil.move(temp_file_path, new_final_path)
-                        logger.info(f"一時ファイルを元の場所に移動しました: {new_final_path}")
-                        # 元のファイルの削除は不要（shutil.moveで既に移動済み）
-                    rename_time = time.time() - rename_start
-                    logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: True)")
-                    return True
-                
-                # 一時ファイルをリネーム
+            if not new_name:
+                self.status_queue.put(f"スキップ: {os.path.basename(pdf_file_path)} - 有効なファイル名を生成できませんでした")
+                logger.warning(f"有効なファイル名がないためスキップ: {pdf_file_path}")
+                return False
+
+            rename_start = time.time()
+            # 元のディレクトリに移動（Windowsエクスプローラーと同じルールで連番を付ける）
+            ext = os.path.splitext(pdf_file_path)[1]
+            base_filename = f"{new_name}{ext}"
+            
+            # Windowsエクスプローラーと同じルールでユニークなファイル名を生成
+            unique_filename = self._get_unique_filename(pdf_file_path, base_filename)
+            new_final_path = os.path.join(os.path.dirname(pdf_file_path), unique_filename)
+            logger.info(f"リネーム後のファイルを元の場所に移動: {new_final_path}")
+            
+            # リネーム前とリネーム後のファイル名が同じ場合はスキップ
+            if os.path.basename(pdf_file_path) == unique_filename:
+                logger.info(f"ファイル名が同じなので移動処理をスキップ: {os.path.basename(pdf_file_path)}")
+                # ファイル名が同じでも、一時ディレクトリのファイルを元の場所に移動して元ファイルを置き換える
                 temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
-                if os.path.exists(work_pdf_path):
-                    shutil.move(work_pdf_path, temp_file_path)
-                    logger.info(f"一時ファイルをリネームしました: {os.path.basename(work_pdf_path)} -> {new_name}{ext}")
-                
-                # 元のディレクトリに移動（上書きではなく、ユニークな名前で保存）
                 if os.path.exists(temp_file_path):
-                    shutil.move(temp_file_path, new_final_path)
-                    logger.info(f"リネーム後のファイルを移動しました: {new_final_path}")
-                    
-                    # 元のファイルを削除
-                    if os.path.exists(pdf_file_path):
+                    # 既存ファイルがあれば削除
+                    if os.path.exists(new_final_path):
                         try:
-                            os.remove(pdf_file_path)
-                            logger.info(f"元のファイルを削除しました: {pdf_file_path}")
+                            os.remove(new_final_path)
+                            logger.info(f"既存ファイルを削除しました: {new_final_path}")
                         except OSError as e:
-                            logger.error(f"元のファイル削除に失敗しました: {e}")
-                            self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
-                    else:
-                        logger.warning(f"元のファイルが見つかりません: {pdf_file_path}")
-                    
-                    rename_time = time.time() - rename_start
-                    logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: True)")
-                    return True
+                            logger.warning(f"既存ファイル削除に失敗しましたが続行します: {e}")
+                    # 一時ファイルを元の場所に移動
+                    shutil.move(temp_file_path, new_final_path)
+                    logger.info(f"一時ファイルを元の場所に移動しました: {new_final_path}")
+                    # 元のファイルの削除は不要（shutil.moveで既に移動済み）
+                rename_time = time.time() - rename_start
+                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: True)")
+                return True
+            
+            # 一時ファイルをリネーム
+            temp_file_path = os.path.join(temp_dir, f"{new_name}{ext}")
+            if os.path.exists(work_pdf_path):
+                shutil.move(work_pdf_path, temp_file_path)
+                logger.info(f"一時ファイルをリネームしました: {os.path.basename(work_pdf_path)} -> {new_name}{ext}")
+            
+            # 元のディレクトリに移動（上書きではなく、ユニークな名前で保存）
+            if os.path.exists(temp_file_path):
+                shutil.move(temp_file_path, new_final_path)
+                logger.info(f"リネーム後のファイルを移動しました: {new_final_path}")
+                
+                # 元のファイルを削除
+                if os.path.exists(pdf_file_path):
+                    try:
+                        os.remove(pdf_file_path)
+                        logger.info(f"元のファイルを削除しました: {pdf_file_path}")
+                    except OSError as e:
+                        logger.error(f"元のファイル削除に失敗しました: {e}")
+                        self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
                 else:
-                    logger.warning(f"一時ファイルが見つかりません: {temp_file_path}")
-                    rename_time = time.time() - rename_start
-                    logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: False)")
-                    return False
-            return False
+                    logger.warning(f"元のファイルが見つかりません: {pdf_file_path}")
+                
+                rename_time = time.time() - rename_start
+                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: True)")
+                return True
+            else:
+                logger.warning(f"一時ファイルが見つかりません: {temp_file_path}")
+                rename_time = time.time() - rename_start
+                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: False)")
+                return False
         except Exception as e:
             total_time = time.time() - start_time
             logger.error(f"PDF処理エラー ({pdf_file_path}): {e} (総処理時間: {total_time:.2f}秒)")
@@ -686,7 +707,7 @@ class PDFProcessor:
                 response = self.openai_client.chat.completions.create(
                     model=current_model,
                     messages=[
-                        {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。"},
+                        {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。必ずJSONのみで応答し、filenameキーにファイル名を入れてください。情報が不足していても必ずファイル名を生成し、謝罪や質問はしないでください。"},
                         {"role": "user", "content": prompt}
                     ],
                     temperature=temperature
@@ -710,7 +731,7 @@ class PDFProcessor:
                         response = self.openai_client.chat.completions.create(
                             model="gpt-5-mini",
                             messages=[
-                                {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。"},
+                                {"role": "system", "content": "あなたは文書の内容を分析し、適切なファイル名を生成する専門家です。必ずJSONのみで応答し、filenameキーにファイル名を入れてください。情報が不足していても必ずファイル名を生成し、謝罪や質問はしないでください。"},
                                 {"role": "user", "content": prompt}
                             ],
                             temperature=1.0  # GPT-5-miniはtemperature=1.0のみサポート
@@ -726,19 +747,14 @@ class PDFProcessor:
             
             # レスポンスの解析
             result = response.choices[0].message.content
-            try:
-                result_dict = json.loads(result)
-                # 使用されたルールを表示
-                if "used_rule" in result_dict:
-                    rule_summary = "適用されたルール:"
-                    rule_summary += f"\n- {result_dict['used_rule']}"
-                    self.status_queue.put(rule_summary)
-                    logger.info(rule_summary)
-                return result_dict.get('filename')
-            except json.JSONDecodeError:
-                # JSONとして解析できない場合は、そのままのテキストを返す
-                return result.strip()
+            filename = self._extract_filename_from_ai_response(result)
+            if filename is None:
+                logger.error(f"AI応答から有効なファイル名を抽出できませんでした: {result[:500]!r}")
+                self.status_queue.put("AIが有効なファイル名を返せませんでした（OCR情報不足または応答形式不正）")
+                return None
+            return filename
                 
+
         except Exception as e:
             ai_time = time.time() - start_time
             logger.error(f"OpenAI APIエラー: {e} ({ai_time:.2f}秒)")
@@ -773,23 +789,129 @@ class PDFProcessor:
             ai_time = time.time() - start_time
             logger.info(f"OpenAI API処理完了: {os.path.basename(pdf_file_path)} ({ai_time:.2f}秒)")
             
+    def _extract_filename_from_ai_response(self, result):
+        """AI応答からファイル名を抽出します。会話文や不正なJSONは拒否します。"""
+        if not result or not str(result).strip():
+            return None
+
+        text = str(result).strip()
+
+        # Markdownコードフェンス内のJSONを優先して抽出
+        fence_match = re.search(r'```(?:json)?\s*(\{.*?\})\s*```', text, re.DOTALL | re.IGNORECASE)
+        candidates = []
+        if fence_match:
+            candidates.append(fence_match.group(1))
+        # 本文中の最初のJSONオブジェクトも候補にする
+        brace_match = re.search(r'\{.*\}', text, re.DOTALL)
+        if brace_match:
+            candidates.append(brace_match.group(0))
+        candidates.append(text)
+
+        parsed = None
+        for candidate in candidates:
+            try:
+                parsed = json.loads(candidate)
+                if isinstance(parsed, dict):
+                    break
+            except json.JSONDecodeError:
+                continue
+
+        if isinstance(parsed, dict):
+            if "used_rule" in parsed:
+                rule_summary = "適用されたルール:"
+                rule_summary += f"\n- {parsed['used_rule']}"
+                self.status_queue.put(rule_summary)
+                logger.info(rule_summary)
+            filename = parsed.get('filename')
+            if filename is None:
+                return None
+            filename = str(filename).strip()
+        else:
+            # JSONでない応答はファイル名として扱わない（謝罪文・質問文の誤採用を防ぐ）
+            logger.warning(f"AI応答がJSONではありません。ファイル名として採用しません: {text[:300]!r}")
+            return None
+
+        if not self._is_plausible_filename(filename):
+            logger.warning(f"AIが返したfilenameが不正です: {filename[:300]!r}")
+            return None
+
+        logger.info(f"AI生成ファイル名: {filename}")
+        return filename
+
+    def _is_plausible_filename(self, filename):
+        """AI応答が実ファイル名として妥当か判定します。"""
+        if not filename or not isinstance(filename, str):
+            return False
+
+        name = filename.strip()
+        if not name:
+            return False
+
+        # 会話・謝罪・質問など、ファイル名ではない応答を拒否
+        rejection_patterns = [
+            r'申し訳ありません',
+            r'生成できません',
+            r'情報が不足',
+            r'教えていただけ',
+            r'どの対応にしますか',
+            r'対応方法',
+            r'再送して',
+            r'仮定してよい場合',
+        ]
+        for pattern in rejection_patterns:
+            if re.search(pattern, name):
+                return False
+
+        # 複数行や極端に長い名前は拒否（Windowsの実用上の上限を考慮）
+        if '\n' in name or '\r' in name:
+            return False
+        if len(name) > 150:
+            return False
+
+        # 句点が多い説明文も拒否
+        if name.count('。') >= 2:
+            return False
+
+        return True
+
     def _normalize_filename(self, filename):
         """ファイル名を正規化します。"""
         if not filename:
             return None
-            
-        # ファイル名に使用できない文字を置換
-        invalid_chars = r'[<>:"/\\|?*]'
+
+        filename = str(filename)
+
+        # 制御文字・ゼロ幅文字を除去
+        filename = re.sub(r'[\x00-\x1f\x7f\u200b\u200c\u200d\ufeff]', '', filename)
+
+        # AIが拡張子付きで返す場合に備え除去
+        if filename.lower().endswith('.pdf'):
+            filename = filename[:-4]
+
+        # 全角スペースは半角に
+        filename = filename.replace('\u3000', ' ')
+
+        # Windowsで使用できない文字を置換（半角記号 + よく混入する全角記号）
+        invalid_chars = r'[<>:"/\\|?*\uff1c\uff1e\uff02\uff0f\uff3c\uff5c\uff1f\uff0a]'
         filename = re.sub(invalid_chars, '_', filename)
-        
-        # 先頭と末尾の空白を削除
-        filename = filename.strip()
-        
+
+        # 先頭と末尾の空白・ドットを削除（Windowsで問題になるため）
+        filename = filename.strip(' .')
+
         # 連続する空白を1つに
         filename = re.sub(r'\s+', ' ', filename)
-        
+
+        # 正規化後も妥当性を確認
+        if not filename or not self._is_plausible_filename(filename):
+            return None
+
+        # Windows MAX_PATH余裕を見てファイル名本体を短縮
+        if len(filename) > 120:
+            filename = filename[:120].rstrip(' .')
+
         return filename
         
+
     def _get_unique_filename(self, base_path, filename):
         """Windowsエクスプローラーと同じルールでユニークなファイル名を生成します。"""
         directory = os.path.dirname(base_path)
