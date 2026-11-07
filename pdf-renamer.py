@@ -220,6 +220,17 @@ class ConfigManager:
             logger.error(f"設定の保存エラー: {e}")
             raise
 
+def _zero_pad_shuho_month(filename):
+    """宗報の月を2桁のゼロ埋めにする。"""
+    def repl(match):
+        month = int(match.group(2))
+        if not 1 <= month <= 12:
+            return match.group(0)
+        return f"{match.group(1)}{month:02d}月号"
+
+    return re.sub(r'(宗報\s*\d{4}年)(\d{1,2})月号', repl, filename)
+
+
 class PDFProcessor:
     """OCRとAIを使用してPDFファイルを処理し、意味のあるファイル名を生成するクラス。"""
     
@@ -448,23 +459,25 @@ class PDFProcessor:
             
             # 元のディレクトリに移動（上書きではなく、ユニークな名前で保存）
             if os.path.exists(temp_file_path):
-                shutil.move(temp_file_path, new_final_path)
+                same_file = os.path.normcase(os.path.abspath(pdf_file_path)) == os.path.normcase(os.path.abspath(new_final_path))
+                # 新しいファイルをBoxへ置く前に消す。同期クライアントが新ファイル取り込み中に元ファイルをロックすることがある
+                removed_before_move = same_file or self._remove_file_with_retry(pdf_file_path, attempts=3, notify=False)
+                try:
+                    shutil.move(temp_file_path, new_final_path)
+                except Exception:
+                    if removed_before_move and not same_file and os.path.exists(temp_file_path) and not os.path.exists(pdf_file_path):
+                        shutil.move(temp_file_path, pdf_file_path)
+                        logger.error(f"新しいファイルの移動に失敗したため、元のファイルを戻しました: {pdf_file_path}")
+                    raise
                 logger.info(f"リネーム後のファイルを移動しました: {new_final_path}")
-                
-                # 元のファイルを削除
-                if os.path.exists(pdf_file_path):
-                    try:
-                        os.remove(pdf_file_path)
-                        logger.info(f"元のファイルを削除しました: {pdf_file_path}")
-                    except OSError as e:
-                        logger.error(f"元のファイル削除に失敗しました: {e}")
-                        self.status_queue.put(f"警告: 元のファイルの削除に失敗しました - {os.path.basename(pdf_file_path)}")
-                else:
-                    logger.warning(f"元のファイルが見つかりません: {pdf_file_path}")
-                
+
+                removed = True
+                if not same_file and os.path.exists(pdf_file_path):
+                    removed = self._remove_file_with_retry(pdf_file_path, attempts=8)
+
                 rename_time = time.time() - rename_start
-                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: True)")
-                return True
+                logger.info(f"ファイルリネーム完了: {rename_time:.2f}秒 (成功: {removed})")
+                return removed
             else:
                 logger.warning(f"一時ファイルが見つかりません: {temp_file_path}")
                 rename_time = time.time() - rename_start
@@ -615,6 +628,7 @@ class PDFProcessor:
             
             # 現在の日付を取得
             current_date = datetime.now().strftime("%Y年%m月%d日")
+            first_of_month = datetime.now().strftime("%Y年%m月01日")
             
             # 名刺読み取りモードの場合の特別なプロンプト
             if self.business_card_mode:
@@ -667,9 +681,11 @@ class PDFProcessor:
 
                 if rule_prompt_template and '{ocr_result}' in rule_prompt_template:
                     naming_rule = (selected_rule.get('命名ルール') or '').replace('{担当者}', self.selected_person)
+                    naming_rule = naming_rule.replace('{今日の日付}', current_date).replace('{今月1日}', first_of_month)
                     prompt = rule_prompt_template.replace('{ocr_result}', ocr_text)
                     prompt = prompt.replace('{担当者}', self.selected_person)
                     prompt = prompt.replace('{今日の日付}', current_date)
+                    prompt = prompt.replace('{今月1日}', first_of_month)
                     prompt = prompt.replace('{命名ルール}', naming_rule)
                     prompt = prompt.replace('{書類の種類}', selected_rule.get('書類の種類', ''))
                     prompt += f"""
@@ -685,6 +701,7 @@ class PDFProcessor:
                         if key in r and isinstance(r[key], str):
                             r[key] = r[key].replace('{担当者}', self.selected_person)
                             r[key] = r[key].replace('{今日の日付}', current_date)
+                            r[key] = r[key].replace('{今月1日}', first_of_month)
                     prompt = f"""
                 以下のOCR結果から、適切なファイル名を生成してください。
                 
@@ -909,6 +926,9 @@ class PDFProcessor:
         # 連続する空白を1つに
         filename = re.sub(r'\s+', ' ', filename)
 
+        # 宗報の月は必ず2桁（例: 宗報 2026年9月号 → 宗報 2026年09月号）
+        filename = _zero_pad_shuho_month(filename)
+
         # 正規化後も妥当性を確認
         if not filename or not self._is_plausible_filename(filename):
             return None
@@ -919,6 +939,69 @@ class PDFProcessor:
 
         return filename
         
+
+    def _remove_file_with_retry(self, file_path, attempts=8, notify=True):
+        """ファイルを削除します。同期フォルダで一時的にロックされていても再試行します。"""
+        if not file_path or not os.path.exists(file_path):
+            return True
+
+        delay = 0.5
+        last_error = None
+        for attempt in range(1, attempts + 1):
+            try:
+                os.remove(file_path)
+                if attempt == 1:
+                    logger.info(f"元のファイルを削除しました: {file_path}")
+                else:
+                    logger.info(f"元のファイルを削除しました（{attempt}回目）: {file_path}")
+                return True
+            except FileNotFoundError:
+                logger.info(f"元のファイルは既にありません: {file_path}")
+                return True
+            except OSError as e:
+                last_error = e
+                winerror = getattr(e, "winerror", None)
+                # 5: アクセス拒否, 32: 共有違反, 33: ロック違反
+                retryable = isinstance(e, PermissionError) or winerror in (5, 32, 33)
+                if retryable:
+                    announced = getattr(self, "_in_use_announced", None)
+                    if announced is None:
+                        announced = set()
+                        self._in_use_announced = announced
+                    key = os.path.normcase(os.path.abspath(file_path))
+                    if key not in announced:
+                        announced.add(key)
+                        name = os.path.basename(file_path)
+                        if winerror in (32, 33):
+                            message = (
+                                f"ファイルが使用中です: {name}。"
+                                "PDFやプレビューを閉じると削除できます。再試行します。"
+                            )
+                        else:
+                            message = (
+                                f"ファイルを削除できません（使用中、またはアクセス拒否）: {name}。"
+                                "開いているアプリを閉じてください。再試行します。"
+                            )
+                        # 再試行で待っている間に気づけるよう、待ちに入る前に出す
+                        print(message, flush=True)
+                        logger.warning(message)
+                        self.status_queue.put(message)
+                if not retryable or attempt == attempts:
+                    break
+                logger.warning(
+                    f"元のファイルを削除できません（{attempt}/{attempts}）: {e}。{delay:.1f}秒後に再試行します"
+                )
+                time.sleep(delay)
+                delay = min(delay * 1.5, 2.0)
+
+        if notify:
+            logger.error(f"元のファイル削除に失敗しました: {last_error}")
+            self.status_queue.put(
+                f"警告: 元のファイルの削除に失敗しました - {os.path.basename(file_path)}"
+            )
+        else:
+            logger.warning(f"移動前の削除に失敗したため、移動後に再試行します: {last_error}")
+        return False
 
     def _get_unique_filename(self, base_path, filename):
         """Windowsエクスプローラーと同じルールでユニークなファイル名を生成します。"""
